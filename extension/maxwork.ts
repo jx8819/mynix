@@ -155,13 +155,33 @@ async function checkAdvisor(): Promise<CheckResult> {
 		.catch(() => "");
 	const hasRole = /modelRoles:[\s\S]*?^\s+advisor:/m.test(text);
 	const hasEnabled = /^advisor:\s*\n\s+enabled:\s*true/m.test(text);
-	if (hasRole && hasEnabled) {
-		return { ok: true, detail: "advisor.enabled=true 且 modelRoles.advisor 已配置" };
+	if (!hasRole || !hasEnabled) {
+		return {
+			ok: false,
+			detail: `config.yml 未完整配置 advisor（role=${hasRole}, enabled=${hasEnabled}）`,
+		};
 	}
-	return {
-		ok: false,
-		detail: `config.yml 未完整配置 advisor（role=${hasRole}, enabled=${hasEnabled}）`,
-	};
+	try {
+		const modelsText = await Bun.file(join(agentDir(), "models.yml")).text().catch(() => "");
+		const m = /xiaomi-token-plan-cn:[\s\S]*?apiKey:\s*([^\s]+)/m.exec(modelsText);
+		const apiKey = m ? m[1] : "";
+		if (apiKey) {
+			const res = await fetch("https://token-plan-cn.xiaomimimo.com/v1/models", {
+				headers: { Authorization: `Bearer ${apiKey}` },
+				signal: AbortSignal.timeout(3000),
+			});
+			if (res.status === 200) {
+				return { ok: true, detail: "advisor.enabled=true 且 MiMo API 连通正常 (HTTP 200)" };
+			}
+			return {
+				ok: false,
+				detail: `advisor: MiMo API 响应异常 (HTTP ${res.status})，Token Plan 配额可能已耗尽！`,
+			};
+		}
+	} catch (e) {
+		return { ok: false, detail: `advisor: MiMo API 探测失败 (${String(e)})` };
+	}
+	return { ok: true, detail: "advisor.enabled=true 且 modelRoles.advisor 已配置" };
 }
 
 async function checkCodex(cfg: MaxworkConfig): Promise<CheckResult> {
@@ -206,7 +226,7 @@ function applyModel(pi: ExtensionAPI, mc: ModelCheck, thinkingLevel: string): vo
 function protocolFor(mode: Mode): string {
 	return mode === "codex"
 		? `[maxwork ON] 本任务按全力协议执行：你是 orchestrator——先分解任务；独立、单目录、只读可完成的子任务按 delegate-to-codex 协议委派（委派前先用 codex login status（带 CODEX_HOME）复核可用；失败（401/quota/超时/空产出）立即收回自己做并向用户说明）。关键路径、落盘、部署、验证由你亲自完成。允许多路并行（task subagents + codex）。`
-		: `[maxwork ON] 本任务按全力协议执行：充分利用并行 task subagents 分解执行；重要改动先验证再落盘。`;
+		: `[maxwork ON] 本任务按全力协议执行（4路并发满载）：你是 orchestrator。执行契约：1. 任务拆解：解耦拆分为最多 4 个互不阻塞且无写冲突的独立分片（跑满 maxConcurrency: 4）；2. 批量派发：必须在单个 task() 工具调用的 tasks 数组中单批同时并发派发这 4 个子任务，严禁单步串行；3. 角色分流：调研/查阅用 scout，通用改动用 task，规范与安全性审查用 reviewer；4. 统一集成：各子代理在独立上下文执行并提交产出，由主调度器统一校验与落盘。重要改动先验证再落盘。`;
 }
 
 export default function maxwork(pi: ExtensionAPI) {
