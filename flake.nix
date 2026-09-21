@@ -16,6 +16,8 @@
       nixosModules.default = import ./module.nix;
       # ompweb Web UI NixOS module
       nixosModules.ompweb = import ./modules/ompweb.nix;
+      # Supermicro IPMI 风扇调速 NixOS module
+      nixosModules.fan-control = import ./modules/fan-control.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = final: prev: {
