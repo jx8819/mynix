@@ -88,6 +88,10 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.user} -"
       "d ${cfg.agentDir} 0750 ${cfg.user} ${cfg.user} -"
+      "z ${cfg.agentDir}/config.yml 0640 ${cfg.user} ${cfg.user} - -"
+      "z ${cfg.agentDir}/models.yml 0640 ${cfg.user} ${cfg.user} - -"
+      "z ${cfg.agentDir}/agent.db 0640 ${cfg.user} ${cfg.user} - -"
+      "z ${cfg.agentDir}/models.db 0640 ${cfg.user} ${cfg.user} - -"
     ];
 
     systemd.services.ompweb = {
@@ -111,6 +115,10 @@ in
         RestartSec = 5;
         EnvironmentFile = config.sops.templates.ompweb-env.path;
         ExecStart = "${ompwebPkg}/bin/ompweb --hostname ${cfg.hostname} --port ${toString cfg.port}";
+        # tmpfiles normally runs only at boot/activation. Reapply the fixed-file
+        # rules before every start because OMP atomically replaces config.yml;
+        # a root-run CLI would otherwise leave a new root-owned 0600 inode.
+        ExecStartPre = "+${pkgs.systemd}/bin/systemd-tmpfiles --create --prefix=${cfg.agentDir}";
         WorkingDirectory = cfg.dataDir;
         # 本服务定位是「管理入口」，防护边界应在网络与认证层（反代密码/TLS），
         # 本单元沙箱仅作防误操作；如需收紧请按主机威胁模型自行加固。
