@@ -1,22 +1,67 @@
-# omp maxwork 全力模式扩展
+# mynix — 共享 Nix 库
 
-一个 [omp](https://github.com/oh-my-pi/omp)（Oh My Pi）扩展：在 omp CLI 或 ompweb 里用 `/maxwork on` 一键进入「全力模式」——**开启/关闭/帮助全部零 LLM、秒回**，不浪费 token 在模式切换本身。
+公开仓库，收录可复用的 Nix 资产；**机制公开，私密值全部抽成 options**（仓库内零主机路径拓扑、零 provider、零密钥）。
 
-开启后：
+## 内容
 
-1. **最高模型**：按角色回退链（默认 `@slow` → `@default`）取第一个已认证可用的模型并拉满 thinking（跨会话自动应用；`/maxwork off` 恢复之前的模型）
-2. **可用性预检 + 回退 + 通知**：advisor 配置、codex CLI 登录态逐项检查；不可用明确 `⚠️` 通知，不静默降级
-3. **每轮注入执行协议**：之后**直接输入任务**即可——每个普通 prompt 自动带上执行协议（codex 编排委派 或 omp 多模型并行）
-
-## 组成
-
-| 文件 | 作用 |
+| 资产 | 说明 |
 |---|---|
-| `extension/maxwork.ts` | omp 扩展：on/off 状态机、模型切换与恢复、预检通知、per-prompt 协议注入、`/maxwork setup|status` |
-| `module.nix` | NixOS module：全部环境相关值抽成 `services.ompMaxwork.*` options |
-| `flake.nix` | 输出 `nixosModules.default` |
+| `extension/maxwork.ts` + `module.nix` | omp maxwork 全力模式扩展（`/maxwork on` 一键最高模型 + advisor 预检 + codex 联动，零 LLM 秒切） |
+| `modules/ompweb.nix` | [ompweb](https://github.com/kahme247/ompweb)（OMP coding agent 的 Web UI）NixOS module |
+| `pkgs/mk-exporter` | [mktxp](https://github.com/akpw/mktxp) 1.2.9 — MikroTik RouterOS Prometheus exporter |
+| `pkgs/nut-exporter` | [prometheus-nut-exporter](https://github.com/HON95/prometheus-nut-exporter) 1.2.1 — NUT UPS exporter |
+| `pkgs/perftest` | [linux-rdma/perftest](https://github.com/linux-rdma/perftest) 26.04.17 — RDMA 性能测试工具集（nixpkgs 无此包） |
+| `pkgs/sas3ircu` | Broadcom SAS3IRCU P16 — SAS HBA 管理工具（nixpkgs 无此包） |
+| `pkgs/yacd-meta` | [Yacd-meta](https://github.com/MetaCubeX/Yacd-meta) **0.3.8（钉住勿升：新版有 bug）** — mihomo external-ui |
+| `pkgs/ompweb` | @kahme247/ompweb 0.5.0（npm registry tarball，免 vendor） |
 
-**公开安全**：扩展零硬编码，所有路径/角色/目录都是 option 或配置 JSON 渲染值。本仓库不包含任何主机路径、provider、密钥信息。
+## 使用
+
+```nix
+inputs.mynix.url = "github:jx8819/mynix";
+
+# 1) overlay 消费包：
+nixpkgs.overlays = [ inputs.mynix.overlays.default ];
+# 然后 pkgs.perftest / pkgs.yacd-meta / ...
+
+# 2) NixOS modules：
+imports = [
+  inputs.mynix.nixosModules.default  # services.ompMaxwork（maxwork 扩展）
+  inputs.mynix.nixosModules.ompweb   # services.ompweb
+];
+
+# 3) 临时跑：
+# nix run github:jx8819/mynix#perftest
+```
+
+## ompweb module 前置条件
+
+- `services.ompweb.sopsFile`：**必填**（密码属调用方私有，本仓库不提供默认值）
+- `services.ompweb.nodeModulesDir`（默认 `/opt/ompweb/lib/node_modules`）：需预先 `npm install` 出 `@kahme247/ompweb` 的完整依赖树（Next 依赖不随 npm 包发布）
+- 生产部署应把它放在带 TLS+认证的反代（caddy/nginx）之后；`hostname` 默认已收紧为 `127.0.0.1`
+
+## maxwork 扩展
+
+见 `module.nix` 内注释。要点：`/maxwork on` 开启（切最高模型+预检，~1s 零 token）、`/maxwork off` 关闭恢复原模型、`/maxwork setup omp|codex` 委派模式、`/maxwork status` 自检。开启后直接输入任务，每轮自动注入执行协议。
+
+advisor 依赖全局配置（扩展只预检不修改）：
+
+```yaml
+# <agentDir>/config.yml
+modelRoles:
+  advisor: <provider>/<model>:<level>
+advisor:
+  enabled: true
+```
+
+## 升级兼容性
+
+扩展文件住在 agent 目录（用户数据区），omp 包升级不触碰；单个扩展加载失败有隔离。扩展 API 无硬性 semver 保证，omp 大版本升级后用 `/maxwork status` 自检。
+
+## 许可
+
+MIT
+
 
 ## 前置条件
 
