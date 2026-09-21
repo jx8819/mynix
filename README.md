@@ -42,47 +42,19 @@ imports = [
 
 ## maxwork 扩展
 
-见 `module.nix` 内注释。要点：`/maxwork on` 开启（切最高模型+预检，~1s 零 token）、`/maxwork off` 关闭恢复原模型、`/maxwork setup omp|codex` 委派模式、`/maxwork status` 自检。开启后直接输入任务，每轮自动注入执行协议。
+`/maxwork on` 一键进入全力模式（omp CLI / ompweb 通用）：切最高模型（角色回退链）+ advisor/codex 预检（不可用回退并通知）+ 之后直接输入任务、每轮自动注入执行协议（codex 编排委派 或 omp 多模型并行）。
 
-advisor 依赖全局配置（扩展只预检不修改）：
+| 输入 | 行为 | 耗时 |
+|---|---|---|
+| `/maxwork` | 显示当前状态与全部子命令 | 即时，零 token |
+| `/maxwork on` | 开启：切最高模型 + 预检 + 通知 | ~1s，零 token |
+| `/maxwork off` | 关闭：恢复开启前的模型 | 即时，零 token |
+| `/maxwork setup [omp\|codex]` | 设置委派模式（不带参数弹选择框） | 即时，零 token |
+| `/maxwork status` | 状态与三项可用性自检 | ~1s，零 token |
 
-```yaml
-# <agentDir>/config.yml
-modelRoles:
-  advisor: <provider>/<model>:<level>
-advisor:
-  enabled: true
-```
-
-## 升级兼容性
-
-扩展文件住在 agent 目录（用户数据区），omp 包升级不触碰；单个扩展加载失败有隔离。扩展 API 无硬性 semver 保证，omp 大版本升级后用 `/maxwork status` 自检。
-
-## 许可
-
-MIT
-
-
-## 前置条件
-
-- omp（extensions 自动发现，`PI_CODING_AGENT_DIR` 下的 `extensions/`）
-- advisor 依赖全局配置（扩展只预检不修改）：
-  ```yaml
-  # <agentDir>/config.yml
-  modelRoles:
-    advisor: <provider>/<model>:<level>
-  advisor:
-    enabled: true
-  ```
-- codex 委派模式需要 [codex CLI](https://github.com/openai/codex) 已登录；不可用时预检回退并通知
-
-## 安装（NixOS / flakes）
+安装：
 
 ```nix
-# flake.nix
-inputs.mynix.url = "github:jx8819/mynix";
-
-# 配置
 imports = [ inputs.mynix.nixosModules.default ];
 
 services.ompMaxwork = {
@@ -102,24 +74,21 @@ services.ompMaxwork = {
 
 非 Nix 用户：把 `extension/maxwork.ts` 放到 `<agentDir>/extensions/`，并参考 `module.nix` 的 JSON 结构写 `<agentDir>/maxwork.config.json`。
 
-## 使用
+advisor 依赖全局配置（扩展只预检不修改）：
 
-| 输入 | 行为 | 耗时 |
-|---|---|---|
-| `/maxwork` | 显示当前状态与全部子命令 | 即时，零 token |
-| `/maxwork on` | 开启：切最高模型 + 预检 + 通知 | ~1s，零 token |
-| `/maxwork off` | 关闭：恢复开启前的模型 | 即时，零 token |
-| `/maxwork setup [omp\|codex]` | 设置委派模式（不带参数弹选择框） | 即时，零 token |
-| `/maxwork status` | 状态与三项可用性自检 | ~1s，零 token |
+```yaml
+# <agentDir>/config.yml
+modelRoles:
+  advisor: <provider>/<model>:<level>
+advisor:
+  enabled: true
+```
 
-两种委派模式：
-
-- **omp**：只用 omp 内可用 API，多模型并行 task subagents
-- **codex**：omp 做 orchestrator，独立子任务委派 codex CLI（委派前复核登录态，失败收回自己做）
+codex 委派模式需要 [codex CLI](https://github.com/openai/codex) 已登录（`CODEX_HOME` 指向含 auth.json 的目录）；不可用时自动回退 omp-only 并通知。
 
 ## 升级兼容性
 
-扩展文件住在 agent 目录（用户数据区），omp 包升级不触碰；单个扩展加载失败有隔离，不影响主程序。扩展 API 无硬性 semver 保证，omp 大版本升级后请用 `/maxwork status` 快速自检一次。
+扩展文件住在 agent 目录（用户数据区），omp 包升级不触碰；单个扩展加载失败有隔离，不影响主程序。扩展 API 无硬性 semver 保证，omp 大版本升级后用 `/maxwork status` 自检。
 
 ## 许可
 
