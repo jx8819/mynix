@@ -115,10 +115,13 @@ in
         RestartSec = 5;
         EnvironmentFile = config.sops.templates.ompweb-env.path;
         ExecStart = "${ompwebPkg}/bin/ompweb --hostname ${cfg.hostname} --port ${toString cfg.port}";
-        # tmpfiles normally runs only at boot/activation. Reapply the fixed-file
-        # rules before every start because OMP atomically replaces config.yml;
-        # a root-run CLI would otherwise leave a new root-owned 0600 inode.
-        ExecStartPre = "+${pkgs.systemd}/bin/systemd-tmpfiles --create --prefix=${cfg.agentDir}";
+        # Plain chown/chmod directly avoids systemd-tmpfiles "unsafe path transition"
+        # across /mnt/Media/Settings (xjn) -> agent (agent).
+        # Runs as root before privilege drop.
+        ExecStartPre = [
+          "+${pkgs.coreutils}/bin/chown ${cfg.user}:${cfg.user} ${cfg.agentDir}/config.yml ${cfg.agentDir}/models.yml ${cfg.agentDir}/agent.db ${cfg.agentDir}/models.db"
+          "+${pkgs.coreutils}/bin/chmod 0640 ${cfg.agentDir}/config.yml ${cfg.agentDir}/models.yml ${cfg.agentDir}/agent.db ${cfg.agentDir}/models.db"
+        ];
         WorkingDirectory = cfg.dataDir;
         # 本服务定位是「管理入口」，防护边界应在网络与认证层（反代密码/TLS），
         # 本单元沙箱仅作防误操作；如需收紧请按主机威胁模型自行加固。
