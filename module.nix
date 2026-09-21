@@ -18,10 +18,6 @@ let
     };
   });
 
-  renderedCommand = pkgs.replaceVars ./extension/maxwork.md {
-    agentDir = cfg.agentDir;
-    command = cfg.command;
-  };
 in
 {
   options.services.ompMaxwork = {
@@ -99,7 +95,6 @@ in
     # maxwork-state.json 是用户运行时状态，不由本模块管理。
     system.activationScripts.ompMaxwork = ''
       install -D -m 0644 -o ${cfg.owner} -g ${cfg.group} ${./extension/maxwork.ts} ${cfg.agentDir}/extensions/maxwork.ts
-      install -D -m 0644 -o ${cfg.owner} -g ${cfg.group} ${renderedCommand} ${cfg.agentDir}/commands/maxwork.md
       install -D -m 0640 -o ${cfg.owner} -g ${cfg.group} ${configJson} ${cfg.agentDir}/maxwork.config.json
     '';
   };

@@ -1,13 +1,15 @@
-// maxwork — 「全力模式」companion 扩展
-// 职责：
-//   1. 监听 input：用户输入 /maxwork ... 时，同步切换模型（回退链）+ 异步预检
-//      advisor/codex 可用性并通知（不满足「check 可用性，不能用时回退并通知」）。
-//   2. 提供免 token 管理命令：/maxwork-setup [mode omp|codex]、/maxwork-status。
-// /maxwork 本身是 commands/maxwork.md 的文件命令（负责把任务展开进 prompt 流），
-// 与本扩展配套；两者共用 maxwork.config.json / maxwork-state.json。
+// maxwork — 「全力模式」开关扩展
+// /maxwork          显示状态与可用子命令（零 LLM，秒回）
+// /maxwork on       开启：切最高模型（回退链）+ 预检 advisor/codex + 通知（零 LLM）
+// /maxwork off      关闭：恢复开启前的模型
+// /maxwork setup    交互/直接设置委派模式（omp = 仅 omp 内 API，codex = omp+codex）
+// /maxwork status   完整状态与可用性检查
 //
-// 所有环境相关值来自 <agentDir>/maxwork.config.json（可由 Nix 渲染），
-// 本文件不含任何环境硬编码，可公开分发。
+// 开启是持久状态（maxwork-state.json）：之后直接输入任务即可，
+// 每个普通 prompt 自动注入执行协议（codex 委派或 omp 并行），跨会话生效。
+//
+// 环境相关值全部来自 <agentDir>/maxwork.config.json（可由 Nix 渲染），
+// 本文件零环境硬编码，可公开分发。
 
 import type {
 	ExtensionAPI,
@@ -32,6 +34,12 @@ interface MaxworkConfig {
 	};
 }
 
+interface MaxworkState {
+	enabled?: boolean;
+	mode?: Mode;
+	prevModelId?: string;
+}
+
 const DEFAULTS: MaxworkConfig = {
 	command: "maxwork",
 	modelRoles: ["@slow", "@default"],
@@ -51,7 +59,7 @@ interface ModelCheck {
 	fellBack: boolean;
 }
 
-// 4 处以上调用点需要同一基准目录，保留具名函数。
+// 多处调用点共用同一基准目录，保留具名函数。
 function agentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".omp", "agent");
 }
@@ -91,21 +99,25 @@ async function loadConfig(): Promise<MaxworkConfig> {
 	return { ...DEFAULTS, ...user, codex: { ...DEFAULTS.codex, ...user.codex } };
 }
 
-async function loadMode(cfg: MaxworkConfig): Promise<Mode> {
+async function loadState(cfg: MaxworkConfig): Promise<Required<MaxworkState>> {
 	const raw: unknown = await Bun.file(join(agentDir(), "maxwork-state.json"))
 		.json()
 		.catch(() => null);
-	const mode =
-		raw && typeof raw === "object"
-			? (raw as Record<string, unknown>).mode
-			: undefined;
-	return mode === "omp" || mode === "codex" ? mode : cfg.defaultMode;
+	const o = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+	const mode = o.mode;
+	return {
+		enabled: o.enabled === true,
+		mode: mode === "omp" || mode === "codex" ? mode : cfg.defaultMode,
+		prevModelId: typeof o.prevModelId === "string" ? o.prevModelId : "",
+	};
 }
 
-async function saveMode(mode: Mode): Promise<void> {
+async function saveState(patch: MaxworkState): Promise<void> {
+	const cfg = await loadConfig();
+	const cur = await loadState(cfg);
 	await Bun.write(
 		join(agentDir(), "maxwork-state.json"),
-		JSON.stringify({ mode }, null, 2) + "\n",
+		JSON.stringify({ ...cur, ...patch }, null, 2) + "\n",
 	);
 }
 
@@ -171,104 +183,167 @@ async function checkCodex(cfg: MaxworkConfig): Promise<CheckResult> {
 	}
 }
 
+function applyModel(pi: ExtensionAPI, mc: ModelCheck, thinkingLevel: string): void {
+	if (!mc.model) return;
+	pi.setModel(mc.model);
+	try {
+		pi.setThinkingLevel(thinkingLevel);
+	} catch {
+		// 模型不支持该 thinking 级别时忽略
+	}
+}
+
+function protocolFor(mode: Mode): string {
+	return mode === "codex"
+		? `[maxwork ON] 本任务按全力协议执行：你是 orchestrator——先分解任务；独立、单目录、只读可完成的子任务按 delegate-to-codex 协议委派（委派前先用 codex login status（带 CODEX_HOME）复核可用；失败（401/quota/超时/空产出）立即收回自己做并向用户说明）。关键路径、落盘、部署、验证由你亲自完成。允许多路并行（task subagents + codex）。`
+		: `[maxwork ON] 本任务按全力协议执行：充分利用并行 task subagents 分解执行；重要改动先验证再落盘。`;
+}
+
 export default function maxwork(pi: ExtensionAPI) {
 	pi.setLabel("Maxwork 全力模式");
 
-	pi.on("session_start", async () => {
+	pi.on("session_start", async (_event, ctx) => {
 		const cfg = await loadConfig();
 		const prefix = `/${cfg.command}`;
 
-		pi.on("input", async (event, ctx) => {
-			const text = event.text ?? "";
-			if (!text.startsWith(prefix + " ") && text !== prefix) return;
-			// setup/status 管理输入不触发激活检查（由模板或管理命令处理）。
-			const rest = text.slice(prefix.length).trim();
-			if (rest === "" || rest === "status" || rest.startsWith("setup")) return;
-
-			// 同步部分：立即切模型（回退链），保证本轮请求就用新模型。
+		// 跨会话持久：开启状态下新会话自动应用最高模型，并预装协议注入
+		//（nextTurn 在下一条 prompt 生效；首条任务因此也能拿到协议）。
+		const boot = await loadState(cfg);
+		if (boot.enabled) {
 			const mc = checkModel(ctx, cfg);
-			if (mc.model) {
-				pi.setModel(mc.model);
-				try {
-					pi.setThinkingLevel(cfg.thinkingLevel);
-				} catch {
-					// 模型不支持该 thinking 级别时忽略
-				}
-			}
+			applyModel(pi, mc, cfg.thinkingLevel);
+			pi.sendMessage(protocolFor(boot.mode), { deliverAs: "nextTurn" });
+			ctx.ui.notify(
+				`[maxwork] 开启中（模式: ${boot.mode}，模型: ${mc.role}）——/maxwork off 关闭`,
+				"info",
+			);
+		}
 
-			// 异步部分：advisor/codex 预检，只影响提示，不阻塞本轮。
-			const notes: string[] = [
-				mc.model
-					? mc.fellBack
-						? `⚠️ 首选模型不可用，已回退到 ${mc.role}`
-						: `模型已切至 ${mc.role}（thinking=${cfg.thinkingLevel}）`
-					: "⚠️ 回退链上无可用模型，保持当前模型",
-			];
-			const adv = await checkAdvisor();
-			if (!adv.ok) notes.push(`⚠️ ${adv.detail}`);
-			const mode = await loadMode(cfg);
-			if (mode === "codex") {
-				const cx = await checkCodex(cfg);
-				if (!cx.ok) {
-					notes.push(
-						`⚠️ codex 预检不可用（${cx.detail}）——agent 委派前会复核，若仍不可用将自行完成全部工作`,
-					);
-				}
-			}
-			ctx.ui.notify(`[maxwork] ${notes.join("；")}（模式: ${mode}）`, "info");
+		// 开启状态下，每个普通 prompt 注入执行协议（nextTurn 随下轮生效）。
+		pi.on("input", async (event, _ctx) => {
+			const st = await loadState(cfg);
+			if (!st.enabled) return;
+			const text = event.text ?? "";
+			if (text.startsWith("/")) return;
+			pi.sendMessage(protocolFor(st.mode), { deliverAs: "nextTurn" });
 		});
 
-		pi.registerCommand(`${cfg.command}-setup`, {
-			description: "设置 maxwork 模式（omp = 仅 omp 内 API，codex = omp+codex CLI）",
+		pi.registerCommand(cfg.command, {
+			description: "全力模式开关：on 开启 / off 关闭 / setup 模式 / status 状态",
 			handler: async (args, ctx) => {
-				const [, m] = args.trim().split(/\s+/);
-				if (m === "omp" || m === "codex") {
-					await saveMode(m);
+				const [sub, ...rest] = args.trim().split(/\s+/).filter(Boolean);
+
+				if (sub === "on") {
+					const st = await loadState(cfg);
+					const prev = ctx.models.current();
+					const mc = checkModel(ctx, cfg);
+					applyModel(pi, mc, cfg.thinkingLevel);
+					await saveState({
+						enabled: true,
+						prevModelId: prev && typeof prev.id === "string" ? prev.id : st.prevModelId,
+					});
+					const notes: string[] = [
+						mc.model
+							? mc.fellBack
+								? `⚠️ 首选模型不可用，已回退到 ${mc.role}`
+								: `模型已切至 ${mc.role}（thinking=${cfg.thinkingLevel}）`
+							: "⚠️ 回退链上无可用模型，保持当前模型",
+					];
+					const adv = await checkAdvisor();
+					if (!adv.ok) notes.push(`⚠️ ${adv.detail}`);
+					if (st.mode === "codex") {
+						const cx = await checkCodex(cfg);
+						if (!cx.ok) {
+							notes.push(`⚠️ codex 不可用（${cx.detail}）——委派任务时将全部自行完成`);
+						}
+					}
 					ctx.ui.notify(
-						`maxwork 模式已设为「${m}」（持久化到 maxwork-state.json）`,
+						`[maxwork ON] ${notes.join("；")}。模式: ${st.mode}。直接输入任务即可；/${cfg.command} off 关闭`,
 						"info",
 					);
 					return;
 				}
-				const current = await loadMode(cfg);
-				if (args.trim() === "" && ctx.hasUI) {
-					try {
-						const choice = await ctx.ui.select(`maxwork 模式（当前: ${current}）`, [
-							"omp    — 只用 omp 内可用 API（多模型并行）",
-							"codex  — omp + codex CLI 一起上",
-						]);
-						if (choice) {
-							await saveMode(choice.startsWith("codex") ? "codex" : "omp");
-							ctx.ui.notify("maxwork 模式已保存", "info");
-						}
-						return;
-					} catch {
-						// 对话框不可用时落到用法提示
-					}
-				}
-				ctx.ui.notify(
-					`当前模式: ${current}。用法: /${cfg.command}-setup omp|codex`,
-					"info",
-				);
-			},
-		});
 
-		pi.registerCommand(`${cfg.command}-status`, {
-			description: "显示 maxwork 当前模式与模型/advisor/codex 可用性",
-			handler: async (_args, ctx) => {
-				const mode = await loadMode(cfg);
-				const mc = checkModel(ctx, cfg);
-				const adv = await checkAdvisor();
-				const cx =
-					mode === "codex"
-						? await checkCodex(cfg)
-						: { ok: true, detail: "(omp 模式，跳过)" };
+				if (sub === "off") {
+					const st = await loadState(cfg);
+					let restored = "";
+					if (st.prevModelId) {
+						const m = ctx.models.resolve(st.prevModelId);
+						if (m) {
+							pi.setModel(m);
+							restored = `，模型已恢复到 ${st.prevModelId}`;
+						}
+					}
+					await saveState({ enabled: false });
+					ctx.ui.notify(`[maxwork OFF] 已关闭${restored}`, "info");
+					return;
+				}
+
+				if (sub === "setup") {
+					const m = rest[0];
+					if (m === "omp" || m === "codex") {
+						await saveState({ mode: m });
+						ctx.ui.notify(`maxwork 委派模式已设为「${m}」`, "info");
+						return;
+					}
+					const st = await loadState(cfg);
+					if (rest.length === 0 && ctx.hasUI) {
+						try {
+							const choice = await ctx.ui.select(
+								`maxwork 委派模式（当前: ${st.mode}）`,
+								[
+									"omp    — 只用 omp 内可用 API（多模型并行）",
+									"codex  — omp + codex CLI 一起上",
+								],
+							);
+							if (choice) {
+								await saveState({
+									mode: choice.startsWith("codex") ? "codex" : "omp",
+								});
+								ctx.ui.notify("maxwork 委派模式已保存", "info");
+							}
+							return;
+						} catch {
+							// 对话框不可用时落到用法提示
+						}
+					}
+					ctx.ui.notify(
+						`当前委派模式: ${st.mode}。用法: /${cfg.command} setup omp|codex`,
+						"info",
+					);
+					return;
+				}
+
+				if (sub === "status") {
+					const st = await loadState(cfg);
+					const mc = checkModel(ctx, cfg);
+					const adv = await checkAdvisor();
+					const cx =
+						st.mode === "codex"
+							? await checkCodex(cfg)
+							: { ok: true, detail: "(omp 模式，跳过)" };
+					ctx.ui.notify(
+						[
+							`状态: ${st.enabled ? "ON" : "OFF"}（委派模式: ${st.mode}）`,
+							`模型: ${mc.role}${mc.fellBack ? "（回退）" : ""} ${mc.model ? "✓" : "✗ 无可用"}`,
+							`advisor: ${adv.ok ? "✓" : "✗"} ${adv.detail}`,
+							`codex: ${cx.ok ? "✓" : "✗"} ${cx.detail}`,
+						].join("\n"),
+						"info",
+					);
+					return;
+				}
+
+				// bare /maxwork 与未知子命令：只给选项，不启动任何任务。
+				const st = await loadState(cfg);
 				ctx.ui.notify(
 					[
-						`模式: ${mode}`,
-						`模型: ${mc.role}${mc.fellBack ? "（回退）" : ""} ${mc.model ? "✓" : "✗ 无可用"}`,
-						`advisor: ${adv.ok ? "✓" : "✗"} ${adv.detail}`,
-						`codex: ${cx.ok ? "✓" : "✗"} ${cx.detail}`,
+						`maxwork 当前: ${st.enabled ? "ON" : "OFF"}（委派模式: ${st.mode}）`,
+						`/${cfg.command} on       开启（切最高模型 + 预检）`,
+						`/${cfg.command} off      关闭（恢复原模型）`,
+						`/${cfg.command} setup    设置委派模式（omp|codex）`,
+						`/${cfg.command} status   可用性自检`,
+						`开启后直接输入任务即可，无需前缀。`,
 					].join("\n"),
 					"info",
 				);
