@@ -135,12 +135,22 @@ function checkModel(
 	ctx: ExtensionCommandContext,
 	cfg: MaxworkConfig,
 ): ModelCheck {
+	if (!cfg.modelRoles || cfg.modelRoles.length === 0) {
+		const cur = ctx.models.current();
+		const name = cur ? (cur.name || cur.id) : "当前选定模型";
+		return { role: `保持当前模型 (${name})`, model: null, fellBack: false };
+	}
 	const available = new Set<string>();
 	for (const m of ctx.models.list() ?? []) {
 		if (typeof m.id === "string") available.add(m.id);
 	}
 	for (let i = 0; i < cfg.modelRoles.length; i++) {
 		const role = cfg.modelRoles[i];
+		if (role === "current" || role === "keep") {
+			const cur = ctx.models.current();
+			const name = cur ? (cur.name || cur.id) : "当前选定模型";
+			return { role: `保持当前模型 (${name})`, model: null, fellBack: false };
+		}
 		const m = ctx.models.resolve(role);
 		if (m && (available.size === 0 || available.has(m.id))) {
 			return { role, model: m, fellBack: i > 0 };
@@ -222,6 +232,19 @@ function applyModel(pi: ExtensionAPI, mc: ModelCheck, thinkingLevel: string): vo
 		// 模型不支持该 thinking 级别时忽略
 	}
 }
+function reply(pi: ExtensionAPI, ctx: ExtensionCommandContext, text: string): void {
+	ctx.ui.notify(text, "info");
+	try {
+		pi.sendMessage({
+			customType: "maxwork",
+			content: text,
+			display: true,
+		});
+	} catch {
+		// 忽略不支持自定义消息呈现的环境
+	}
+}
+
 
 function protocolFor(mode: Mode): string {
 	return mode === "codex"
@@ -241,9 +264,10 @@ export default function maxwork(pi: ExtensionAPI) {
 		const mc = checkModel(ctx, cfg);
 		applyModel(pi, mc, cfg.thinkingLevel);
 		pi.sendMessage(protocolFor(boot.mode), { deliverAs: "nextTurn" });
-		ctx.ui.notify(
-			`[maxwork] 开启中（模式: ${boot.mode}，模型: ${mc.role}）——/${cfg.command} off 关闭`,
-			"info",
+		reply(
+			pi,
+			ctx,
+			`[maxwork] 开启中（模式: ${boot.mode}，${mc.role}）——/${cfg.command} off 关闭`,
 		);
 	});
 
@@ -275,7 +299,7 @@ export default function maxwork(pi: ExtensionAPI) {
 						? mc.fellBack
 							? `⚠️ 首选模型不可用，已回退到 ${mc.role}`
 							: `模型已切至 ${mc.role}（thinking=${cfg.thinkingLevel}）`
-						: "⚠️ 回退链上无可用模型，保持当前模型",
+						: `保持当前模型（${mc.role}）`,
 				];
 				const adv = await checkAdvisor();
 				if (!adv.ok) notes.push(`⚠️ ${adv.detail}`);
@@ -285,9 +309,10 @@ export default function maxwork(pi: ExtensionAPI) {
 						notes.push(`⚠️ codex 不可用（${cx.detail}）——委派任务时将全部自行完成`);
 					}
 				}
-				ctx.ui.notify(
+				reply(
+					pi,
+					ctx,
 					`[maxwork ON] ${notes.join("；")}。模式: ${st.mode}。直接输入任务即可；/${cfg.command} off 关闭`,
-					"info",
 				);
 				return;
 			}
@@ -303,7 +328,7 @@ export default function maxwork(pi: ExtensionAPI) {
 					}
 				}
 				await saveState(cfg, { enabled: false });
-				ctx.ui.notify(`[maxwork OFF] 已关闭${restored}`, "info");
+				reply(pi, ctx, `[maxwork OFF] 已关闭${restored}`);
 				return;
 			}
 
@@ -311,7 +336,7 @@ export default function maxwork(pi: ExtensionAPI) {
 				const m = rest[0];
 				if (m === "omp" || m === "codex") {
 					await saveState(cfg, { mode: m });
-					ctx.ui.notify(`maxwork 委派模式已设为「${m}」`, "info");
+					reply(pi, ctx, `maxwork 委派模式已设为「${m}」`);
 					return;
 				}
 				const st = await loadState(cfg);
@@ -328,16 +353,17 @@ export default function maxwork(pi: ExtensionAPI) {
 							await saveState(cfg, {
 								mode: choice.startsWith("codex") ? "codex" : "omp",
 							});
-							ctx.ui.notify("maxwork 委派模式已保存", "info");
+							reply(pi, ctx, "maxwork 委派模式已保存");
 						}
 						return;
 					} catch {
 						// 对话框不可用时落到用法提示
 					}
 				}
-				ctx.ui.notify(
+				reply(
+					pi,
+					ctx,
 					`当前委派模式: ${st.mode}。用法: /${cfg.command} setup omp|codex`,
-					"info",
 				);
 				return;
 			}
@@ -350,30 +376,32 @@ export default function maxwork(pi: ExtensionAPI) {
 					st.mode === "codex"
 						? await checkCodex(cfg)
 						: { ok: true, detail: "(omp 模式，跳过)" };
-				ctx.ui.notify(
+				reply(
+					pi,
+					ctx,
 					[
 						`状态: ${st.enabled ? "ON" : "OFF"}（委派模式: ${st.mode}）`,
-						`模型: ${mc.role}${mc.fellBack ? "（回退）" : ""} ${mc.model ? "✓" : "✗ 无可用"}`,
+						`模型: ${mc.model ? `${mc.role}${mc.fellBack ? "（回退）" : ""} ✓` : `${mc.role} ✓ (保持不变)`}`,
 						`advisor: ${adv.ok ? "✓" : "✗"} ${adv.detail}`,
 						`codex: ${cx.ok ? "✓" : "✗"} ${cx.detail}`,
 					].join("\n"),
-					"info",
 				);
 				return;
 			}
 
 			// bare /maxwork 与未知子命令：只给选项，不启动任何任务。
 			const st = await loadState(cfg);
-			ctx.ui.notify(
+			reply(
+				pi,
+				ctx,
 				[
 					`maxwork 当前: ${st.enabled ? "ON" : "OFF"}（委派模式: ${st.mode}）`,
-					`/${cfg.command} on       开启（切最高模型 + 预检）`,
+					`/${cfg.command} on       开启（${cfg.modelRoles.length > 0 ? "切最高模型" : "保持当前模型"} + 预检）`,
 					`/${cfg.command} off      关闭（恢复原模型）`,
 					`/${cfg.command} setup    设置委派模式（omp|codex）`,
 					`/${cfg.command} status   可用性自检`,
 					`开启后直接输入任务即可，无需前缀。`,
 				].join("\n"),
-				"info",
 			);
 		},
 	});
