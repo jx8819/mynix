@@ -1,5 +1,5 @@
 {
-  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb）。机制公开，私密值全在调用方 options。";
+  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、rules-sync（ros-rules-generator）NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb / ros-rules-generator）。机制公开，私密值全在调用方 options。";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
@@ -18,6 +18,8 @@
       nixosModules.ompweb = import ./modules/ompweb.nix;
       # Supermicro IPMI 风扇调速 NixOS module
       nixosModules.fan-control = import ./modules/fan-control.nix;
+      # ros-rules-generator 规则列表同步（systemd timer）NixOS module
+      nixosModules.rules-sync = import ./modules/rules-sync.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = final: prev: {
@@ -27,6 +29,7 @@
         sas3ircu = prev.callPackage ./pkgs/sas3ircu { };
         yacd-meta = prev.callPackage ./pkgs/yacd-meta { };
         ompweb = prev.callPackage ./pkgs/ompweb { };
+        ros-rules-generator = prev.callPackage ./pkgs/ros-rules-generator { };
       };
 
       # 临时使用：nix run github:jx8819/mynix#<name>
@@ -35,6 +38,7 @@
           mk-exporter
           nut-exporter
           perftest
+          ros-rules-generator
           sas3ircu
           yacd-meta
           ompweb;
