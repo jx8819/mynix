@@ -54,7 +54,6 @@ stdenv.mkDerivation (finalAttrs: {
 
   meta = with lib; {
     description = "Yet Another Clash Dashboard (Yacd-meta) — mihomo external-ui";
-    homepage = "https://github.com/MetaCubeX/Yacd-meta";
     license = licenses.mit;
     platforms = with platforms; all;
   };

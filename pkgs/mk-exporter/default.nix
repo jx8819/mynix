@@ -36,8 +36,6 @@ python3Packages.buildPythonApplication {
   ];
 
   meta = {
-    homepage = "https://github.com/akpw/mktxp";
-    changelog = "https://github.com/akpw/mktxp/releases/tag/v${version}";
     description = "Prometheus Exporter for Mikrotik RouterOS devices";
     license = lib.licenses.gpl2;
     platforms = lib.platforms.linux;

@@ -192,6 +192,7 @@ func (f *Fetcher) Fetch(ctx context.Context, rawURL string, maxBytes int64) ([]b
 var (
 	reIPv4          = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$`)
 	reValidDomain   = regexp.MustCompile(`^[0-9a-zA-Z\.-]+$`)
+	reScheme        = regexp.MustCompile(`https?://`)
 	reDomainSuffix  = regexp.MustCompile(`^  - DOMAIN(-SUFFIX)?,`)
 	reAiPayloadRule = regexp.MustCompile(`^  - (DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|IP-CIDR),`)
 )
@@ -256,8 +257,7 @@ func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
 		}
 		line = strings.ReplaceAll(line, "|", "")
 		line = strings.ReplaceAll(line, "@", "")
-		line = strings.ReplaceAll(line, "https://", "")
-		line = strings.ReplaceAll(line, "http://", "")
+		line = reScheme.ReplaceAllString(line, "")
 
 		// sed '/apple\.com/d; /sina\.cn/d; /sina\.com\.cn/d; /baidu\.com/d; /qq\.com/d'
 		if strings.Contains(line, "apple.com") ||
@@ -781,35 +781,15 @@ var validGfwlistFormats = map[string]bool{
 	"microsoft": true,
 }
 
-// defaultSources mirrors the historical hardcoded download list.
+// defaultSources returns the empty built-in fallback used when -sources is omitted.
+// All upstream URLs are private deployment config; pass them via -sources JSON (see the NixOS module).
+// Defaults are intentionally empty.
 func defaultSources() Sources {
 	return Sources{
-		Gfwlist: []GfwlistSource{
-			{Name: "gfwlist1", URL: "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt", Format: "gfwlist"},
-			{Name: "gfwlist2", URL: "https://raw.githubusercontent.com/hq450/fancyss/master/rules/gfwlist.conf", Format: "fancyss"},
-			{Name: "gfwlist3", URL: "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt", Format: "plain"},
-			{Name: "gfwlist4", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Microsoft.list", Format: "microsoft"},
-			{Name: "gfwlist5", URL: "https://raw.githubusercontent.com/Loukky/gfwlist-by-loukky/master/gfwlist.txt", Format: "gfwlist"},
-		},
-		AI: []Source{
-		},
-		Google: []Source{
-			{Name: "google_list", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/refs/heads/master/PROXY/Google.list"},
-		},
-		Rules: []RuleSource{
-			{Name: "rule_Telegram", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/PROXY/Telegram.yaml", Output: "rules/Telegram.yaml"},
-			{Name: "rule_YouTube", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Global-Services/YouTube.yaml", Output: "rules/YouTube.yaml"},
-			{Name: "rule_Netflix", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Global-Services/Netflix.yaml", Output: "rules/Netflix.yaml"},
-			{Name: "rule_GlobalMedia", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/GlobalMedia.yaml", Output: "rules/GlobalMedia.yaml"},
-			{Name: "rule_PROXY", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/PROXY.yaml", Output: "rules/PROXY.yaml"},
-			{Name: "rule_Apple", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Apple.yaml", Output: "rules/Apple.yaml"},
-			{Name: "rule_Game", URL: "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Game.yaml", Output: "rules/Game.yaml"},
-			{Name: "rule_proxy_txt", URL: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt", Output: "rules/proxy.txt"},
-			{Name: "rule_lancidr_txt", URL: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/lancidr.txt", Output: "rules/lancidr.txt"},
-			{Name: "rule_gfw_txt", URL: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/gfw.txt", Output: "rules/gfw.txt"},
-			{Name: "rule_greatfire", URL: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/greatfire.txt", Output: "rules/greatfire.txt"},
-			{Name: "rule_direct_txt", URL: "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt", Output: "rules/direct.txt"},
-		},
+		Gfwlist: []GfwlistSource{},
+		AI:      []Source{},
+		Google:  []Source{},
+		Rules:   []RuleSource{},
 	}
 }
 

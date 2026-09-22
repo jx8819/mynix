@@ -1,4 +1,4 @@
-# ompweb — Web UI for the OMP coding agent（https://github.com/kahme247/ompweb）
+# ompweb — Web UI for the OMP coding agent（upstream: kahme247/ompweb）
 #
 # 上游 npm 包 @kahme247/ompweb 已包含编译好的 Next.js 输出（.next），
 # 直接从 npm registry 取 tarball 解包，避免在仓库里 vendor 26M 产物。
@@ -38,7 +38,6 @@ stdenv.mkDerivation {
 
   meta = with lib; {
     description = "Web UI for the OMP coding agent";
-    homepage = "https://github.com/kahme247/ompweb";
     license = licenses.mit;
     platforms = platforms.linux;
     mainProgram = "ompweb";

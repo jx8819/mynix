@@ -27,7 +27,6 @@
    '';
   meta = with lib; {
     description = "Infiniband Verbs Performance Tests";
-    homepage = "https://github.com/linux-rdma/perftest";
     license = licenses.gpl2Only;
     platforms = platforms.linux;
     maintainers = with maintainers; [ ];

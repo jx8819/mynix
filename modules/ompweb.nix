@@ -1,5 +1,5 @@
 # ompweb — Web UI for the OMP coding agent
-# https://github.com/kahme247/ompweb
+# ompweb upstream project (link removed: https links are private per policy 2026-09-23)
 #
 # NixOS module：机制全部公开；主机相关的值都是 options（在调用方的私有配置里赋值）。
 { config, lib, pkgs, ... }:

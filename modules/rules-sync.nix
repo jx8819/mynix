@@ -81,14 +81,8 @@ in
           };
         };
       });
-      default = [
-        { name = "gfwlist1"; url = "https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"; format = "gfwlist"; }
-        { name = "gfwlist2"; url = "https://raw.githubusercontent.com/hq450/fancyss/master/rules/gfwlist.conf"; format = "fancyss"; }
-        { name = "gfwlist3"; url = "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"; format = "plain"; }
-        { name = "gfwlist4"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Microsoft.list"; format = "microsoft"; }
-        { name = "gfwlist5"; url = "https://raw.githubusercontent.com/Loukky/gfwlist-by-loukky/master/gfwlist.txt"; format = "gfwlist"; }
-      ];
-      description = "GFW list sources feeding clean-list generation, processed in list order. Any number of entries is allowed.";
+      default = [];
+      description = "GFW list sources feeding clean-list generation, processed in list order. Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
     };
 
     aiSources = lib.mkOption {
@@ -104,9 +98,8 @@ in
           };
         };
       });
-      default = [
-      ];
-      description = "AI rule sources feeding rules/ai.yaml and the clean-ai domain set. Any number of entries is allowed.";
+      default = [];
+      description = "AI rule sources feeding rules/ai.yaml and the clean-ai domain set. Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
     };
 
     googleSources = lib.mkOption {
@@ -122,10 +115,8 @@ in
           };
         };
       });
-      default = [
-        { name = "google_list"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/refs/heads/master/PROXY/Google.list"; }
-      ];
-      description = "Google rules sources; each entry is transformed into rules/google_rules.yaml (payload sections are concatenated in list order).";
+      default = [];
+      description = "Google rules sources; each entry is transformed into rules/google_rules.yaml (payload sections are concatenated in list order). Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
     };
 
     ruleSources = lib.mkOption {
@@ -145,21 +136,8 @@ in
           };
         };
       });
-      default = [
-        { name = "rule_Telegram"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/PROXY/Telegram.yaml"; output = "rules/Telegram.yaml"; }
-        { name = "rule_YouTube"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Global-Services/YouTube.yaml"; output = "rules/YouTube.yaml"; }
-        { name = "rule_Netflix"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Global-Services/Netflix.yaml"; output = "rules/Netflix.yaml"; }
-        { name = "rule_GlobalMedia"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/GlobalMedia.yaml"; output = "rules/GlobalMedia.yaml"; }
-        { name = "rule_PROXY"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/PROXY.yaml"; output = "rules/PROXY.yaml"; }
-        { name = "rule_Apple"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Apple.yaml"; output = "rules/Apple.yaml"; }
-        { name = "rule_Game"; url = "https://raw.githubusercontent.com/LM-Firefly/Rules/master/Clash-RuleSet-Classical/Game.yaml"; output = "rules/Game.yaml"; }
-        { name = "rule_proxy_txt"; url = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/proxy.txt"; output = "rules/proxy.txt"; }
-        { name = "rule_lancidr_txt"; url = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/lancidr.txt"; output = "rules/lancidr.txt"; }
-        { name = "rule_gfw_txt"; url = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/gfw.txt"; output = "rules/gfw.txt"; }
-        { name = "rule_greatfire"; url = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/greatfire.txt"; output = "rules/greatfire.txt"; }
-        { name = "rule_direct_txt"; url = "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/direct.txt"; output = "rules/direct.txt"; }
-      ];
-      description = "Rule files downloaded verbatim to their configured output path. Any number of entries is allowed.";
+      default = [];
+      description = "Rule files downloaded verbatim to their configured output path. Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
     };
 
     calendar = lib.mkOption {

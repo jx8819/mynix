@@ -9,6 +9,7 @@ let
     command = cfg.command;
     modelRoles = cfg.modelRoles;
     thinkingLevel = cfg.thinkingLevel;
+    modelProbeUrl = cfg.modelProbeUrl;
     defaultMode = cfg.defaultMode;
     codex = {
       home = cfg.codex.home;
@@ -59,6 +60,11 @@ in
       description = "激活时设置的 thinking 级别";
     };
 
+    modelProbeUrl = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      description = "advisor 健康预检的模型 API 探测端点（完整 URL 含协议头；留空跳过网络探测）。真实端点属私有配置，写在使用方的私有仓。";
+    };
     defaultMode = lib.mkOption {
       type = lib.types.enum [ "omp" "codex" ];
       default = "codex";

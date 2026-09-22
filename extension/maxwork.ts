@@ -30,6 +30,7 @@ interface MaxworkConfig {
 	command: string;
 	modelRoles: string[]; // 按优先级回退链
 	thinkingLevel: string;
+	modelProbeUrl: string;
 	defaultMode: Mode;
 	codex: {
 		home: string;
@@ -49,6 +50,7 @@ const DEFAULTS: MaxworkConfig = {
 	command: "maxwork",
 	modelRoles: ["@slow", "@default"],
 	thinkingLevel: "max",
+	modelProbeUrl: "",
 	defaultMode: "codex",
 	codex: { home: "", outDir: "", tmpdir: "/tmp", timeoutSec: 300 },
 };
@@ -80,6 +82,7 @@ function parseConfig(raw: unknown): Partial<MaxworkConfig> {
 		);
 	}
 	if (typeof o.thinkingLevel === "string") out.thinkingLevel = o.thinkingLevel;
+	if (typeof o.modelProbeUrl === "string") out.modelProbeUrl = o.modelProbeUrl;
 	if (o.defaultMode === "omp" || o.defaultMode === "codex") {
 		out.defaultMode = o.defaultMode;
 	}
@@ -159,7 +162,7 @@ function checkModel(
 	return { role: "(current)", model: null, fellBack: true };
 }
 
-async function checkAdvisor(): Promise<CheckResult> {
+async function checkAdvisor(cfg: MaxworkConfig): Promise<CheckResult> {
 	const text = await Bun.file(join(agentDir(), "config.yml"))
 		.text()
 		.catch(() => "");
@@ -175,8 +178,9 @@ async function checkAdvisor(): Promise<CheckResult> {
 		const modelsText = await Bun.file(join(agentDir(), "models.yml")).text().catch(() => "");
 		const m = /xiaomi-token-plan-cn:[\s\S]*?apiKey:\s*([^\s]+)/m.exec(modelsText);
 		const apiKey = m ? m[1] : "";
+		if (!cfg.modelProbeUrl) return { ok: true, detail: "advisor.enabled=true（modelProbeUrl 未配置，跳过 API 探测）" };
 		if (apiKey) {
-			const res = await fetch("https://token-plan-cn.xiaomimimo.com/v1/models", {
+			const res = await fetch(cfg.modelProbeUrl, {
 				headers: { Authorization: `Bearer ${apiKey}` },
 				signal: AbortSignal.timeout(3000),
 			});
@@ -301,7 +305,7 @@ export default function maxwork(pi: ExtensionAPI) {
 							: `模型已切至 ${mc.role}（thinking=${cfg.thinkingLevel}）`
 						: `保持当前模型（${mc.role}）`,
 				];
-				const adv = await checkAdvisor();
+				const adv = await checkAdvisor(cfg);
 				if (!adv.ok) notes.push(`⚠️ ${adv.detail}`);
 				if (st.mode === "codex") {
 					const cx = await checkCodex(cfg);
@@ -371,7 +375,7 @@ export default function maxwork(pi: ExtensionAPI) {
 			if (sub === "status") {
 				const st = await loadState(cfg);
 				const mc = checkModel(ctx, cfg);
-				const adv = await checkAdvisor();
+				const adv = await checkAdvisor(cfg);
 				const cx =
 					st.mode === "codex"
 						? await checkCodex(cfg)
