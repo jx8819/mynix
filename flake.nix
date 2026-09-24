@@ -1,5 +1,5 @@
 {
-  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、rules-sync（ros-rules-generator）NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb / ros-rules-generator）。机制公开，私密值全在调用方 options。";
+  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、rules-sync（ros-rules-generator）NixOS module、mesh-guardian（Xiaomi Mesh 有线中继看门狗）NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb / ros-rules-generator / mesh-guardian）。机制公开，私密值全在调用方 options。";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
@@ -20,6 +20,8 @@
       nixosModules.fan-control = import ./modules/fan-control.nix;
       # ros-rules-generator 规则列表同步（systemd timer）NixOS module
       nixosModules.rules-sync = import ./modules/rules-sync.nix;
+      # Xiaomi Mesh 有线中继恢复看门狗 NixOS module
+      nixosModules.mesh-guardian = import ./modules/mesh-guardian.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = final: prev: {
@@ -30,6 +32,7 @@
         yacd-meta = prev.callPackage ./pkgs/yacd-meta { };
         ompweb = prev.callPackage ./pkgs/ompweb { };
         ros-rules-generator = prev.callPackage ./pkgs/ros-rules-generator { };
+        mesh-guardian = prev.callPackage ./pkgs/mesh-guardian { };
       };
 
       # 临时使用：nix run github:jx8819/mynix#<name>
@@ -41,7 +44,8 @@
           ros-rules-generator
           sas3ircu
           yacd-meta
-          ompweb;
+          ompweb
+          mesh-guardian;
       };
     };
 }
