@@ -276,10 +276,11 @@ def _save_state(path: Path, records: dict[str, APRecord], latch: bool) -> None:
     tmp.rename(path)
 
 
-def _restore_state(path: Path, records: dict[str, APRecord]) -> bool:
-    """Return daemon-wide latch from persisted state."""
+def _restore_state(path: Path, records: dict[str, APRecord]) -> None:
+    """Restore per-AP counters from disk.
+    LATCH is never restored — a service restart is the human's signal
+    to try again from a clean slate."""
     saved = _load_state(path)
-    latch = saved.get("latch", False)
     for ip, s in saved.get("aps", {}).items():
         if ip not in records:
             continue
@@ -288,11 +289,13 @@ def _restore_state(path: Path, records: dict[str, APRecord]) -> bool:
             rec.state = APState[s["state"]]
         except KeyError:
             rec.state = APState.OK
+        # Never carry LATCH across restarts.
+        if rec.state == APState.LATCH:
+            rec.state = APState.OK
         rec.state_since = s.get("state_since", time.monotonic())
         rec.consecutive_failures = s.get("consecutive_failures", 0)
         rec.last_reboot_at = s.get("last_reboot_at", 0.0)
         rec.offline_since = s.get("offline_since")
-    return latch
 
 
 # ──────────────────────────────────────────────
@@ -329,9 +332,8 @@ def run(args: argparse.Namespace) -> None:
 
     state_path = Path(args.state_file)
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    daemon_latch = _restore_state(state_path, records)
-    if daemon_latch:
-        logging.warning("Daemon-wide LATCH restored from state file. Manual --unlatch required.")
+    _restore_state(state_path, records)
+    daemon_latch = False
 
     # Signal handler: graceful shutdown
     stop = False
@@ -393,14 +395,9 @@ def run(args: argparse.Namespace) -> None:
                 f"mesh-guardian on {socket.gethostname()} has reached the failure "
                 f"limit ({args.max_failures} consecutive failures) for the following "
                 f"Mesh satellite APs:\n\n  {names}\n\n"
-                f"Automatic recovery has been suspended (LATCH state). "
-                f"Investigate, then unlock with:\n\n"
-                f"  mesh-guardian --unlatch --state-file {args.state_file}\n"
+                f"Automatic recovery has been suspended. Once you have investigated, "
+                f"simply restart the service to resume monitoring:\n\n"
                 f"  systemctl restart mesh-guardian\n\n"
-                f"The --unlatch flag clears the LATCH and resets failure counts in "
-                f"the state file; the service restart then picks up the clean state. "
-                f"Do NOT restart without --unlatch first — the daemon reloads the "
-                f"LATCH from disk on startup.\n\n"
                 f"-- mesh-guardian"
             )
             send_mail(
@@ -599,22 +596,8 @@ def main() -> None:
                    help="Path to JSON state persistence file")
     p.add_argument("--debug", action="store_true",
                    help="Enable verbose debug logging")
-    p.add_argument("--unlatch", action="store_true",
-                   help="Clear persisted LATCH and per-AP failure counts then exit")
 
     args = p.parse_args()
-
-    if args.unlatch:
-        state_path = Path(args.state_file)
-        saved = _load_state(state_path)
-        saved["latch"] = False
-        for ap in saved.get("aps", {}).values():
-            ap["consecutive_failures"] = 0
-            ap["state"] = "OK"
-        state_path.write_text(json.dumps(saved, indent=2))
-        print("Latch cleared.")
-        return
-
     run(args)
 
 
