@@ -393,11 +393,14 @@ def run(args: argparse.Namespace) -> None:
                 f"mesh-guardian on {socket.gethostname()} has reached the failure "
                 f"limit ({args.max_failures} consecutive failures) for the following "
                 f"Mesh satellite APs:\n\n  {names}\n\n"
-                f"Automatic recovery has been suspended. Please investigate and then "
-                f"run:\n\n"
+                f"Automatic recovery has been suspended (LATCH state). "
+                f"Investigate, then unlock with:\n\n"
+                f"  mesh-guardian --unlatch --state-file {args.state_file}\n"
                 f"  systemctl restart mesh-guardian\n\n"
-                f"(The service clears its state on start; alternatively delete "
-                f"{args.state_file} manually.)\n\n"
+                f"The --unlatch flag clears the LATCH and resets failure counts in "
+                f"the state file; the service restart then picks up the clean state. "
+                f"Do NOT restart without --unlatch first — the daemon reloads the "
+                f"LATCH from disk on startup.\n\n"
                 f"-- mesh-guardian"
             )
             send_mail(
