@@ -84,6 +84,19 @@ in
       description = "Seconds of mandatory calm after a successful recovery before resuming normal monitoring. Prevents a second reboot during the post-reboot settle window.";
     };
 
+    unreachableThreshold = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 2;
+      description = ''
+        Consecutive failed ping probes required before an AP is declared
+        unreachable. Debounce: a single dropped probe (cold ARP right after the
+        service starts, transient loss) is ignored instead of logging a scary
+        "went unreachable ... came back after 64s" pair that reads like a real
+        outage. With the default checkInterval of 60s, 2 means roughly one
+        missed cycle — still short enough to catch a genuine AP reboot.
+      '';
+    };
+
     offlineGrace = lib.mkOption {
       type = lib.types.ints.positive;
       default = 600;
@@ -206,7 +219,8 @@ in
           "--wireless-dwell"   (toString cfg.wirelessDwell)
           "--reboot-wait"      (toString cfg.rebootWait)
           "--cooldown"         (toString cfg.cooldown)
-          "--offline-grace"    (toString cfg.offlineGrace)
+          "--offline-grace"   (toString cfg.offlineGrace)
+          "--unreachable-threshold" (toString cfg.unreachableThreshold)
           "--max-failures"     (toString cfg.maxFailures)
           "--api-timeout"      (toString cfg.apiTimeout)
           "--ping-timeout"     (toString cfg.pingTimeout)

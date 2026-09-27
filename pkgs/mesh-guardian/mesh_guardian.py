@@ -188,6 +188,8 @@ class APRecord:
     last_reboot_at: float = 0.0
     # monotonic timestamp when AP was first seen offline/unreachable
     offline_since: Optional[float] = None
+    # consecutive failed ping probes; used for the unreachable debounce
+    ping_failures: int = 0
 
     def transition(self, new_state: APState) -> None:
         if self.state != new_state:
@@ -449,11 +451,21 @@ def _tick_ap(
     is_wired = ip in wired_ips
     reachable = is_reachable(ip, timeout=args.ping_timeout)
 
-    # Track unreachable / offline duration
+    # Track unreachable / offline duration — debounced.
+    # A single dropped probe is noise (cold ARP right after start, transient
+    # loss), not an outage: 2026-09-27 one missed probe 4s after a service
+    # restart logged "went unreachable ... came back online after 64s" and read
+    # like a 64s outage when nothing happened (Switch-1 ether8 had zero link
+    # events all day). Require --unreachable-threshold consecutive failures
+    # before believing the AP is gone.
     if not reachable:
-        if rec.offline_since is None:
+        rec.ping_failures += 1
+        if rec.offline_since is None and rec.ping_failures >= args.unreachable_threshold:
             rec.offline_since = now_mono
-            logging.info("[%s] went unreachable", rec.name)
+            logging.info(
+                "[%s] went unreachable (%d consecutive probes failed)",
+                rec.name, rec.ping_failures,
+            )
     else:
         if rec.offline_since is not None:
             logging.info(
@@ -461,7 +473,13 @@ def _tick_ap(
                 rec.name,
                 now_mono - rec.offline_since,
             )
-        rec.offline_since = None
+            rec.offline_since = None
+        elif rec.ping_failures:
+            logging.debug(
+                "[%s] %d dropped probe(s) ignored (debounce threshold %d)",
+                rec.name, rec.ping_failures, args.unreachable_threshold,
+            )
+        rec.ping_failures = 0
 
     offline_duration = (now_mono - rec.offline_since) if rec.offline_since else 0.0
 
@@ -613,6 +631,8 @@ def main() -> None:
                    help="Seconds to wait for wired recovery after reboot (default: 180)")
     p.add_argument("--cooldown", type=int, default=300,
                    help="Seconds of calm after successful recovery before resuming normal checks (default: 300)")
+    p.add_argument("--unreachable-threshold", type=int, default=2,
+                   help="Consecutive failed probes before an AP is declared unreachable (debounce; default: 2). Single dropped probes are ignored.")
     p.add_argument("--offline-grace", type=int, default=600,
                    help="Seconds an AP may be unreachable before we consider it a long-term absence (power cut / maintenance); no reboot is issued during this window or after (default: 600)")
 
