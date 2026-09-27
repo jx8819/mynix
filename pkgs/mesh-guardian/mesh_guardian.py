@@ -538,10 +538,10 @@ def _tick_ap(
         return
 
     # Trigger reboot
+    attempt = rec.consecutive_failures + 1
     logging.warning(
         "[%s] wireless for %.0fs; rebooting (attempt %d/%d)",
-        rec.name, wireless_secs,
-        rec.consecutive_failures + 1, args.max_failures,
+        rec.name, wireless_secs, attempt, args.max_failures,
     )
     try:
         client.reboot()
@@ -552,6 +552,33 @@ def _tick_ap(
         rec.consecutive_failures += 1
         if rec.consecutive_failures >= args.max_failures:
             rec.transition(APState.LATCH)
+        return
+
+    # 自动处置动作已发出 —— 通知。自愈了也让你知道它动过手。
+    if args.mail_to and args.mail_from:
+        sent = send_mail(
+            sender=args.mail_from,
+            recipient=args.mail_to,
+            subject=(
+                f"[mesh-guardian] {rec.name} 掉到无线回程，已自动重启"
+                f"（第 {attempt}/{args.max_failures} 次）"
+            ),
+            body=(
+                f"mesh-guardian on {socket.gethostname()} 检测到 Mesh 从 AP "
+                f"{rec.name}（{ip}）回程退化为无线（已持续 {wireless_secs:.0f}s > "
+                f"{args.wireless_dwell}s），已自动下发重启指令尝试恢复有线回程。\n\n"
+                f"这是第 {attempt}/{args.max_failures} 次尝试。\n"
+                f"  · 恢复有线 → 自动回 OK，无需处理\n"
+                f"  · 连续 {args.max_failures} 次失败 → 进入 LATCH，会再发一封需要人工介入的告警\n\n"
+                f"-- mesh-guardian"
+            ),
+            sendmail_bin=args.sendmail,
+        )
+        if not sent:
+            logging.error(
+                "[%s] reboot notification NOT DELIVERED (see sendmail error above)",
+                rec.name,
+            )
 
 
 def _sleep(seconds: int, stop_fn) -> None:
