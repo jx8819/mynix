@@ -234,7 +234,10 @@ in
         ProtectControlGroups = true;
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
-        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+        # AF_NETLINK / AF_PACKET 是 postfix sendmail 的 getifaddrs() 必需的
+        # （缺了会 `fatal: inet_addr_local[getifaddrs]: Address family not
+        # supported by protocol`，exit 75，告警静默丢失）。
+        RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" "AF_PACKET" ];
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;

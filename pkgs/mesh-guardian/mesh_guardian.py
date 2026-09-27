@@ -206,7 +206,13 @@ def send_mail(
     subject: str,
     body: str,
     sendmail_bin: str = "/run/wrappers/bin/sendmail",
-) -> None:
+) -> bool:
+    """Return True only when sendmail actually accepted the message.
+
+    A watchdog that lies about having alerted is worse than one that admits it
+    failed — 2026-09-26 the LATCH alert was silently lost to a sendmail sandbox
+    failure while the log claimed "Sent alert to ...".
+    """
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
@@ -224,10 +230,12 @@ def send_mail(
             logging.error(
                 "sendmail exited %d: %s", result.returncode, result.stderr.decode()
             )
-        else:
-            logging.info("Email sent to %s: %s", recipient, subject)
+            return False
+        logging.info("Email sent to %s: %s", recipient, subject)
+        return True
     except Exception as exc:
         logging.error("Failed to send email: %s", exc)
+        return False
 
 
 # ──────────────────────────────────────────────
@@ -400,14 +408,20 @@ def run(args: argparse.Namespace) -> None:
                 f"  systemctl restart mesh-guardian\n\n"
                 f"-- mesh-guardian"
             )
-            send_mail(
+            sent = send_mail(
                 sender=args.mail_from,
                 recipient=args.mail_to,
                 subject=f"[mesh-guardian] Manual intervention required: {names}",
                 body=body,
                 sendmail_bin=args.sendmail,
             )
-            logging.error("LATCH engaged. Sent alert to %s.", args.mail_to)
+            if sent:
+                logging.error("LATCH engaged. Alert sent to %s.", args.mail_to)
+            else:
+                logging.error(
+                    "LATCH engaged. ALERT NOT DELIVERED — sendmail failed, "
+                    "see the error above. Nobody was notified."
+                )
 
         _save_state(state_path, records, daemon_latch)
         _sleep(args.check_interval, lambda: stop)
