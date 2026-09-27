@@ -238,11 +238,17 @@ in
         # （缺了会 `fatal: inet_addr_local[getifaddrs]: Address family not
         # supported by protocol`，exit 75，告警静默丢失）。
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" "AF_PACKET" ];
+        # sendmail 是 setgid postdrop 的 wrapper，而 NoNewPrivileges 会让 setgid
+        # 失效；postdrop 还要往队列目录写信。两者缺一，告警照样发不出去：
+        #  - ProtectSystem=strict 让 /var/lib/postfix/queue 只读 →
+        #    `mail_queue_enter: ... Read-only file system`
+        #  - 没有 postdrop 组 → 写不进 `drwx-wx--- xjn postdrop` 的 maildrop/
+        # 所以显式放行队列目录 + 把服务用户加进 postdrop 组。
+        ReadWritePaths = [ (builtins.dirOf cfg.stateFile) "/var/lib/postfix/queue" ];
+        SupplementaryGroups = [ "postdrop" ];
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
-
-        ReadWritePaths = [ (builtins.dirOf cfg.stateFile) ];
 
         # Allow sendmail to be called (it's a setuid wrapper)
         AmbientCapabilities = [];

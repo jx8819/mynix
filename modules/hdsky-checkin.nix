@@ -168,6 +168,13 @@ in
         # AF_UNIX 是 sendmail 必需；AF_NETLINK / AF_PACKET 是 postfix 的
         # getifaddrs() 必需（缺了 `Address family not supported by protocol`）。
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" "AF_PACKET" ];
+        # sendmail 是 setgid postdrop 的 wrapper，NoNewPrivileges 会让 setgid 失效；
+        # postdrop 还要往队列目录写信。缺任一条告警都发不出去：
+        #  - ProtectSystem=strict 让 /var/lib/postfix/queue 只读 →
+        #    `mail_queue_enter: ... Read-only file system`
+        #  - 没有 postdrop 组 → 写不进 `drwx-wx--- xjn postdrop` 的 maildrop/
+        ReadWritePaths = [ "/var/lib/postfix/queue" ];
+        SupplementaryGroups = [ "postdrop" ];
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
