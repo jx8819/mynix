@@ -690,7 +690,7 @@ type parsedSource struct {
 }
 
 // generateCleanList aggregates and calculates clean-list domains.
-func generateCleanList(sources []parsedSource, cleanAi, myProxy, direct []string, debug bool) []string {
+func generateCleanList(sources []parsedSource, cleanAi, myProxy, cleanIp, direct []string, debug bool) []string {
 	var combined []string
 	rawTotal := 0
 	var sourceCounts []string
@@ -700,6 +700,7 @@ func generateCleanList(sources []parsedSource, cleanAi, myProxy, direct []string
 		sourceCounts = append(sourceCounts, fmt.Sprintf("%s=%d", s.name, len(s.lines)))
 	}
 	combined = append(combined, myProxy...)
+	combined = append(combined, cleanIp...)
 	combined = append(combined, cleanAi...)
 
 	rawTotal += len(cleanAi)
@@ -707,10 +708,10 @@ func generateCleanList(sources []parsedSource, cleanAi, myProxy, direct []string
 	cleanList := differenceWithDirect(listTxt, direct)
 
 	if debug {
-		log.Printf("[DEBUG] clean-list: %d raw domains, -%d direct whitelist, +%d custom proxy -> %d unique domains",
-			rawTotal, len(direct), len(myProxy), len(cleanList))
-		log.Printf("[DEBUG] [AGGREGATE] raw_upstream=%d (%s, clean_ai=%d), custom_proxy=%d, dedup_output=%d, direct_whitelist=%d, direct_subtracted=%d, final_clean_list=%d",
-			rawTotal, strings.Join(sourceCounts, ", "), len(cleanAi), len(myProxy), len(listTxt), len(direct), len(listTxt)-len(cleanList), len(cleanList))
+		log.Printf("[DEBUG] clean-list: %d raw domains, -%d direct whitelist, +%d custom proxy, +%d clean-ip -> %d unique domains",
+			rawTotal, len(direct), len(myProxy), len(cleanIp), len(cleanList))
+		log.Printf("[DEBUG] [AGGREGATE] raw_upstream=%d (%s, clean_ai=%d), custom_proxy=%d, clean_ip=%d, dedup_output=%d, direct_whitelist=%d, direct_subtracted=%d, final_clean_list=%d",
+			rawTotal, strings.Join(sourceCounts, ", "), len(cleanAi), len(myProxy), len(cleanIp), len(listTxt), len(direct), len(listTxt)-len(cleanList), len(cleanList))
 	}
 
 	return cleanList
@@ -730,7 +731,7 @@ func generateDomainRsc(domains []string, debug bool) []byte {
 	return res
 }
 
-func generateClashGfwList(domains []string, debug bool) []byte {
+func generateClashDomainList(domains []string, listName string, debug bool) []byte {
 	var clashGfwBuf bytes.Buffer
 	clashGfwBuf.WriteString("payload:\n")
 	for _, domain := range domains {
@@ -738,9 +739,13 @@ func generateClashGfwList(domains []string, debug bool) []byte {
 	}
 	res := clashGfwBuf.Bytes()
 	if debug {
-		log.Printf("[DEBUG] clash-gfw-list: generated %d payload items (%d bytes)", len(domains), len(res))
+		log.Printf("[DEBUG] %s: generated %d payload items (%d bytes)", listName, len(domains), len(res))
 	}
 	return res
+}
+
+func generateClashGfwList(domains []string, debug bool) []byte {
+	return generateClashDomainList(domains, "clash-gfw-list", debug)
 }
 
 // ----------------------------------------------------------------------------
@@ -1064,6 +1069,7 @@ type Generator struct {
 	tempParent  string
 	direct      []string
 	myProxy     []string
+	cleanIp     []string
 	tmdbDomains []string
 	tmdbECS     string
 	sources     Sources
@@ -1093,7 +1099,7 @@ func loadDomainList(flagVal, filePath string, debug bool, listName string) ([]st
 	return domains, nil
 }
 
-func NewGenerator(outDir, tempParent string, direct, myProxy, tmdbDomains []string, tmdbECS string, sources Sources, debug bool) (*Generator, error) {
+func NewGenerator(outDir, tempParent string, direct, myProxy, cleanIp, tmdbDomains []string, tmdbECS string, sources Sources, debug bool) (*Generator, error) {
 	absOut, err := filepath.Abs(outDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outDir: %w", err)
@@ -1113,6 +1119,7 @@ func NewGenerator(outDir, tempParent string, direct, myProxy, tmdbDomains []stri
 		tempParent:  absTempParent,
 		direct:      direct,
 		myProxy:     myProxy,
+		cleanIp:     cleanIp,
 		tmdbDomains: tmdbDomains,
 		tmdbECS:     tmdbECS,
 		sources:     sources,
@@ -1208,12 +1215,13 @@ func (g *Generator) Run(ctx context.Context) error {
 	}
 	cleanAi := parseCleanAiDomains("clean-ai", aiFiles, g.debug)
 
-	cleanList := generateCleanList(gfwLists, cleanAi, g.myProxy, g.direct, g.debug)
+	cleanList := generateCleanList(gfwLists, cleanAi, g.myProxy, g.cleanIp, g.direct, g.debug)
 
 	log.Printf("Generated clean-list: %d entries", len(cleanList))
 
 	domainRscData := generateDomainRsc(cleanList, g.debug)
 	clashGfwData := generateClashGfwList(cleanList, g.debug)
+	cleanIpData := generateClashDomainList(sortUfSedUniqU(g.cleanIp), "rules/clean-ip.txt", g.debug)
 
 	var cleanListBuf bytes.Buffer
 	for _, domain := range cleanList {
@@ -1260,6 +1268,7 @@ func (g *Generator) Run(ctx context.Context) error {
 	}
 
 	// rules/ files
+	filesToWrite = append(filesToWrite, fileEntry{path: "rules/clean-ip.txt", content: cleanIpData, isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/ai.yaml", content: aiYaml, isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/google_rules.yaml", content: googleRulesYaml, isYaml: true})
 
@@ -1268,9 +1277,9 @@ func (g *Generator) Run(ctx context.Context) error {
 		filesToWrite = append(filesToWrite, fileEntry{path: s.Output, content: fetched[s.Name], isYaml: strings.HasSuffix(s.Output, ".yaml")})
 	}
 
-	// Total files check: 3 top-level + rules/ai.yaml + rules/google_rules.yaml + len(rules) passthrough
+	// Total files check: 3 top-level + rules/clean-ip.txt + rules/ai.yaml + rules/google_rules.yaml + len(rules) passthrough
 	// (+ tmdb.rsc when the DNS-TMDB mapping is enabled)
-	expectedFiles := 5 + len(g.sources.Rules)
+	expectedFiles := 6 + len(g.sources.Rules)
 	if tmdbRsc != nil {
 		expectedFiles++
 	}
@@ -1456,6 +1465,8 @@ func main() {
 	directDomainsFile := flag.String("direct-domains-file", "", "Path to file containing direct domains, one per line")
 	proxyDomains := flag.String("proxy-domains", "", "Comma-separated list of proxy domains")
 	proxyDomainsFile := flag.String("proxy-domains-file", "", "Path to file containing proxy domains, one per line")
+	cleanIpDomains := flag.String("clean-ip-domains", "", "Comma-separated list of clean-ip domains")
+	cleanIpDomainsFile := flag.String("clean-ip-domains-file", "", "Path to file containing clean-ip domains, one per line")
 	tmdbDomains := flag.String("tmdb-domains", "", "Comma-separated TMDB domains for DNS static mapping (empty disables tmdb.rsc)")
 	tmdbDomainsFile := flag.String("tmdb-domains-file", "", "Path to file containing TMDB domains, one per line")
 	tmdbECS := flag.String("tmdb-edns-subnet", defaultTmdbECS, "EDNS Client Subnet hint for DoH queries (empty disables ECS)")
@@ -1475,6 +1486,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Load proxy domains failed: %v", err)
 	}
+	cleanIp, err := loadDomainList(*cleanIpDomains, *cleanIpDomainsFile, *debug, "clean-ip")
+	if err != nil {
+		log.Fatalf("Load clean-ip domains failed: %v", err)
+	}
+
 
 	tmdb, err := loadDomainList(*tmdbDomains, *tmdbDomainsFile, *debug, "tmdb")
 	if err != nil {
@@ -1486,7 +1502,7 @@ func main() {
 		log.Fatalf("Load sources failed: %v", err)
 	}
 
-	gen, err := NewGenerator(*outDir, *tempParent, direct, proxy, tmdb, *tmdbECS, sources, *debug)
+	gen, err := NewGenerator(*outDir, *tempParent, direct, proxy, cleanIp, tmdb, *tmdbECS, sources, *debug)
 	if err != nil {
 		log.Fatalf("Init generator failed: %v", err)
 	}

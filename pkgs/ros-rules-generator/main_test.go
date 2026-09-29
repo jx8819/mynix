@@ -85,27 +85,27 @@ func TestDebugLogging(t *testing.T) {
 
 	// 3. Clean-list debug logging
 	buf.Reset()
-	clean := generateCleanList([]parsedSource{{name: "gfw1", lines: []string{"a.com", "b.com"}}}, nil, []string{"c.com"}, []string{"a.com"}, true)
+	clean := generateCleanList([]parsedSource{{name: "gfw1", lines: []string{"a.com", "b.com"}}}, nil, []string{"c.com"}, []string{"d.com"}, []string{"a.com"}, true)
 	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] clean-list: 2 raw domains, -1 direct whitelist, +1 custom proxy -> 2 unique domains") {
+	if !strings.Contains(out, "[DEBUG] clean-list: 2 raw domains, -1 direct whitelist, +1 custom proxy, +1 clean-ip -> 3 unique domains") {
 		t.Errorf("missing clean-list debug log: %s", out)
 	}
-	if len(clean) != 2 {
-		t.Errorf("expected 2 unique domains, got %d", len(clean))
+	if len(clean) != 3 {
+		t.Errorf("expected 3 unique domains, got %d", len(clean))
 	}
 
 	// 4. Domain RSC and Clash GFW debug logging
 	buf.Reset()
 	_ = generateDomainRsc(clean, true)
 	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] domain.rsc: generated 2 static DNS FWD entries") {
+	if !strings.Contains(out, "[DEBUG] domain.rsc: generated 3 static DNS FWD entries") {
 		t.Errorf("missing domain.rsc debug log: %s", out)
 	}
 
 	buf.Reset()
 	_ = generateClashGfwList(clean, true)
 	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] clash-gfw-list: generated 2 payload items") {
+	if !strings.Contains(out, "[DEBUG] clash-gfw-list: generated 3 payload items") {
 		t.Errorf("missing clash-gfw-list debug log: %s", out)
 	}
 

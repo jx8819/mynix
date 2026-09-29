@@ -11,6 +11,10 @@ let
     lib.concatStringsSep "\n" cfg.proxyDomains + "\n"
   );
 
+  cleanIpDomainsFile = pkgs.writeText "rules-sync-clean-ip-domains.txt" (
+    lib.concatStringsSep "\n" cfg.cleanIpDomains + "\n"
+  );
+
   tmdbDomainsFile = pkgs.writeText "rules-sync-tmdb-domains.txt" (
     lib.concatStringsSep "\n" cfg.tmdbDns.domains + "\n"
   );
@@ -69,6 +73,12 @@ in
       type = lib.types.listOf lib.types.str;
       default = [];
       description = "Custom proxy domains to include in proxy rules";
+    };
+
+    cleanIpDomains = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "Clean IP domains to route through clean egress proxies (generated into rules/clean-ip.txt and domain.rsc)";
     };
 
     tmdbDns = {
@@ -205,7 +215,7 @@ in
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -sources ${sourcesFile}${tmdbFlags}${lib.optionalString cfg.debug " -debug"}";
+        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -clean-ip-domains-file ${cleanIpDomainsFile} -sources ${sourcesFile}${tmdbFlags}${lib.optionalString cfg.debug " -debug"}";
 
         # 显式指定 UMask 为 0022，保证目录 0755 与文件 0644 的权限确定性
         UMask = "0022";
