@@ -3,12 +3,21 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDebugLogging(t *testing.T) {
@@ -120,5 +129,130 @@ func TestDebugLogging(t *testing.T) {
 	lines := splitRawLines(rawWithNewline)
 	if len(lines) != 2 {
 		t.Errorf("expected 2 lines, got %d: %v", len(lines), lines)
+	}
+}
+
+func TestParseDoHAnswers(t *testing.T) {
+	raw := []byte(`{"Status":0,"Answer":[` +
+		`{"name":"a.test","type":1,"data":"99.84.215.46"},` +
+		`{"name":"a.test","type":28,"data":"2600:9000::1"},` +
+		`{"name":"a.test","type":5,"data":"cdn.example."},` +
+		`{"name":"a.test","type":1,"data":"not-an-ip"}]}`)
+	ips, err := parseDoHAnswers("a.test", raw)
+	if err != nil {
+		t.Fatalf("parse failed: %v", err)
+	}
+	if len(ips) != 1 || ips[0] != "99.84.215.46" {
+		t.Fatalf("want only the A record, got %v", ips)
+	}
+
+	if _, err := parseDoHAnswers("a.test", []byte(`{"Status":3}`)); err == nil {
+		t.Error("want error on non-zero rcode")
+	}
+	if _, err := parseDoHAnswers("a.test", []byte(`{broken`)); err == nil {
+		t.Error("want error on malformed JSON")
+	}
+}
+
+func TestGenerateTmdbRsc(t *testing.T) {
+	out := generateTmdbRsc(map[string][]string{
+		"b.test": {"2.2.2.2"},
+		"a.test": {"1.1.1.1", "1.1.1.2"},
+	}, false)
+	want := "/ip dns static remove numbers=[/ip dns static find comment=tmdb]\n" +
+		"/ip dns static\n" +
+		"add name=a.test address=1.1.1.1 type=A comment=tmdb\n" +
+		"add name=a.test address=1.1.1.2 type=A comment=tmdb\n" +
+		"add name=b.test address=2.2.2.2 type=A comment=tmdb\n"
+	if string(out) != want {
+		t.Errorf("tmdb.rsc mismatch:\ngot:\n%s\nwant:\n%s", out, want)
+	}
+}
+
+// newTestTLSCert issues a self-signed server certificate for the given DNS names.
+func newTestTLSCert(t *testing.T, dnsNames ...string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("gen key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: dnsNames[0]},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     dnsNames,
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create cert: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+// startTestTLSServer serves TLS on 127.0.0.1:<random>, completing handshakes then closing.
+func startTestTLSServer(t *testing.T, cert tls.Certificate) (addr string, stop func()) {
+	t.Helper()
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				if tc, ok := c.(*tls.Conn); ok {
+					_ = tc.Handshake()
+				}
+				_ = c.Close()
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), func() {
+		_ = ln.Close()
+		<-done
+	}
+}
+
+func TestResolveTmdb(t *testing.T) {
+	// 假 DoH：任何域名都答 127.0.0.1（TLS 校验端口指向本地假 TLS 服务器）
+	doh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/dns-json")
+		_, _ = w.Write([]byte(`{"Status":0,"Answer":[{"name":"x","type":1,"data":"127.0.0.1"}]}`))
+	}))
+	defer doh.Close()
+
+	addr, stop := startTestTLSServer(t, newTestTLSCert(t, "good.test"))
+	defer stop()
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	oldEps, oldPort := dohEndpoints, tmdbVerifyPort
+	dohEndpoints = []dohEndpoint{{url: doh.URL, accept: "application/dns-json"}}
+	tmdbVerifyPort = port
+	defer func() { dohEndpoints, tmdbVerifyPort = oldEps, oldPort }()
+
+	g := &Generator{tmdbDomains: []string{"good.test"}, tmdbECS: ""}
+	verified, err := g.resolveTmdb(context.Background())
+	if err != nil {
+		t.Fatalf("resolve good.test: %v", err)
+	}
+	if got := verified["good.test"]; len(got) != 1 || got[0] != "127.0.0.1" {
+		t.Fatalf("want [127.0.0.1], got %v", got)
+	}
+
+	// 证书只含 good.test：bad.test 的候选 IP 全部被 SNI 校验拒掉 → 整轮必须失败
+	g2 := &Generator{tmdbDomains: []string{"bad.test"}, tmdbECS: ""}
+	if _, err := g2.resolveTmdb(context.Background()); err == nil {
+		t.Fatal("want error when no candidate IP passes the SNI check")
 	}
 }

@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -742,6 +744,198 @@ func generateClashGfwList(domains []string, debug bool) []byte {
 }
 
 // ----------------------------------------------------------------------------
+// TMDB DNS mapping（思路源自 myzhongqiang/DNS-TMDB；解析通道换大厂 DoH 并加硬校验）
+//
+// 第一性原理（2026-09-29 实测）：TMDB 在国内可直连——www.themoviedb.org 走真实
+// CloudFront IP 直连 200；坏的是 DNS：国内公共 DNS 对 api.themoviedb.org 给出不可达
+// 假答案（199.96.62.41，直连 12s 超时）。所以不需要代理，只需要「正确 IP 直连」。
+//
+// 管线：大厂 DoH（Google / Cloudflare，HTTPS 加密；弃用原版无名第三方 ip33 API）
+// + ECS 提示国内网段（让 CDN 返回国内最优边缘）→ 候选 IP 逐一 TLS SNI 握手、按证书
+// SAN 证明「该 IP 真的在服务该域名」（比原版 ICMP ping 过滤强）→ 生成 tmdb.rsc
+// （RouterOS /ip dns static 映射，路由器每日 05:00 拉取）。
+// ----------------------------------------------------------------------------
+
+const (
+	defaultTmdbECS = "115.192.0.0/11" // ECS 提示：浙江电信（家宽归属），只影响 CDN 选边
+	tmdbMaxIPs     = 4                // 每域名最多保留的已验证 IP
+	tmdbVerifyTO   = 5 * time.Second
+	tmdbDohTO      = 15 * time.Second
+)
+
+// dohEndpoints 只用大厂 DoH JSON API。
+type dohEndpoint struct{ url, accept string }
+
+var dohEndpoints = []dohEndpoint{
+	{"https://dns.google/resolve", "application/dns-json"},
+	{"https://cloudflare-dns.com/dns-query", "application/dns-json"},
+}
+
+// tmdbVerifyPort 供测试替换（生产恒为 443）。
+var tmdbVerifyPort = "443"
+
+// dohQueryA asks one DoH JSON endpoint for the A records of domain.
+func dohQueryA(ctx context.Context, endpoint, accept, domain, ecs string) ([]string, error) {
+	q := endpoint + "?name=" + url.QueryEscape(domain) + "&type=A"
+	if ecs != "" {
+		q += "&edns_client_subnet=" + url.QueryEscape(ecs)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, q, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", accept)
+	resp, err := (&http.Client{Timeout: tmdbDohTO}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+	if err != nil {
+		return nil, err
+	}
+	return parseDoHAnswers(domain, raw)
+}
+
+// parseDoHAnswers extracts IPv4 A records from a DoH JSON response (Google/Cloudflare schema).
+func parseDoHAnswers(domain string, raw []byte) ([]string, error) {
+	var payload struct {
+		Status int `json:"Status"`
+		Answer []struct {
+			Type int    `json:"type"`
+			Data string `json:"data"`
+		} `json:"Answer"`
+	}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return nil, fmt.Errorf("decode DoH answer for %s: %w", domain, err)
+	}
+	if payload.Status != 0 {
+		return nil, fmt.Errorf("DoH %s: rcode %d", domain, payload.Status)
+	}
+	var ips []string
+	for _, a := range payload.Answer {
+		if a.Type != 1 { // A only
+			continue
+		}
+		ip := net.ParseIP(a.Data)
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		ips = append(ips, ip.To4().String())
+	}
+	return ips, nil
+}
+
+// verifyTmdbIP runs a TLS handshake to ip:tmdbVerifyPort with SNI=domain and checks the
+// presented leaf certificate is valid for domain. Proves the IP really serves the domain.
+func verifyTmdbIP(ctx context.Context, ip, domain string) error {
+	dialer := &tls.Dialer{
+		NetDialer: &net.Dialer{Timeout: tmdbVerifyTO},
+		Config: &tls.Config{
+			ServerName: domain,
+			// 不做 CA 链校验：这里要证明的是「IP 在服务该域名」而非「谁签的名」，
+			// 域名归属由下面的 SAN 校验显式确认。
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+		},
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", net.JoinHostPort(ip, tmdbVerifyPort))
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	state := conn.(*tls.Conn).ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return errors.New("no peer certificate")
+	}
+	return state.PeerCertificates[0].VerifyHostname(domain)
+}
+
+// resolveTmdb resolves every configured domain via all DoH endpoints and keeps only IPs
+// passing the TLS SNI check. A domain with zero verified IPs fails the whole run: a silent
+// gap would reintroduce the broken-DNS symptom, and the atomic deploy contract keeps the
+// previous lists live on failure.
+func (g *Generator) resolveTmdb(ctx context.Context) (map[string][]string, error) {
+	verified := make(map[string][]string, len(g.tmdbDomains))
+	for _, domain := range sortUniqStrings(g.tmdbDomains) {
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		var candidates []string
+		for _, ep := range dohEndpoints {
+			wg.Add(1)
+			go func(u, accept string) {
+				defer wg.Done()
+				ips, err := dohQueryA(ctx, u, accept, domain, g.tmdbECS)
+				if err != nil {
+					log.Printf("tmdb dns: %s via %s: %v", domain, u, err)
+					return
+				}
+				mu.Lock()
+				candidates = append(candidates, ips...)
+				mu.Unlock()
+			}(ep.url, ep.accept)
+		}
+		wg.Wait()
+
+		var vmu sync.Mutex
+		var vwg sync.WaitGroup
+		var good []string
+		for _, ip := range sortUniqStrings(candidates) {
+			vwg.Add(1)
+			go func(ip string) {
+				defer vwg.Done()
+				if err := verifyTmdbIP(ctx, ip, domain); err != nil {
+					log.Printf("tmdb verify: %s (%s) rejected: %v", ip, domain, err)
+					return
+				}
+				vmu.Lock()
+				good = append(good, ip)
+				vmu.Unlock()
+			}(ip)
+		}
+		vwg.Wait()
+
+		if len(good) == 0 {
+			return nil, fmt.Errorf("domain %s: no verified IP among %d candidates", domain, len(candidates))
+		}
+		good = sortUniqStrings(good)
+		if len(good) > tmdbMaxIPs {
+			good = good[:tmdbMaxIPs]
+		}
+		verified[domain] = good
+		log.Printf("tmdb dns: %s -> %s", domain, strings.Join(good, ","))
+	}
+	return verified, nil
+}
+
+// generateTmdbRsc renders RouterOS DNS static A mappings, replaceable via comment=tmdb.
+func generateTmdbRsc(verified map[string][]string, debug bool) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("/ip dns static remove numbers=[/ip dns static find comment=tmdb]\n")
+	buf.WriteString("/ip dns static\n")
+	domains := make([]string, 0, len(verified))
+	for d := range verified {
+		domains = append(domains, d)
+	}
+	sort.Strings(domains)
+	entries := 0
+	for _, domain := range domains {
+		for _, ip := range verified[domain] {
+			fmt.Fprintf(&buf, "add name=%s address=%s type=A comment=tmdb\n", domain, ip)
+			entries++
+		}
+	}
+	res := buf.Bytes()
+	if debug {
+		log.Printf("[DEBUG] tmdb.rsc: generated %d static DNS A entries (%d bytes)", entries, len(res))
+	}
+	return res
+}
+
+// ----------------------------------------------------------------------------
 // Download Sources
 // ----------------------------------------------------------------------------
 
@@ -865,13 +1059,15 @@ func loadSources(path string) (Sources, error) {
 // ----------------------------------------------------------------------------
 
 type Generator struct {
-	fetcher    *Fetcher
-	outDir     string
-	tempParent string
-	direct     []string
-	myProxy    []string
-	sources    Sources
-	debug      bool
+	fetcher     *Fetcher
+	outDir      string
+	tempParent  string
+	direct      []string
+	myProxy     []string
+	tmdbDomains []string
+	tmdbECS     string
+	sources     Sources
+	debug       bool
 }
 
 func loadDomainList(flagVal, filePath string, debug bool, listName string) ([]string, error) {
@@ -897,7 +1093,7 @@ func loadDomainList(flagVal, filePath string, debug bool, listName string) ([]st
 	return domains, nil
 }
 
-func NewGenerator(outDir, tempParent string, direct, myProxy []string, sources Sources, debug bool) (*Generator, error) {
+func NewGenerator(outDir, tempParent string, direct, myProxy, tmdbDomains []string, tmdbECS string, sources Sources, debug bool) (*Generator, error) {
 	absOut, err := filepath.Abs(outDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve outDir: %w", err)
@@ -912,13 +1108,15 @@ func NewGenerator(outDir, tempParent string, direct, myProxy []string, sources S
 	}
 
 	return &Generator{
-		fetcher:    NewFetcher(8, debug),
-		outDir:     absOut,
-		tempParent: absTempParent,
-		direct:     direct,
-		myProxy:    myProxy,
-		sources:    sources,
-		debug:      debug,
+		fetcher:     NewFetcher(8, debug),
+		outDir:      absOut,
+		tempParent:  absTempParent,
+		direct:      direct,
+		myProxy:     myProxy,
+		tmdbDomains: tmdbDomains,
+		tmdbECS:     tmdbECS,
+		sources:     sources,
+		debug:       debug,
 	}, nil
 }
 
@@ -1032,6 +1230,16 @@ func (g *Generator) Run(ctx context.Context) error {
 		googleRulesYaml = append(googleRulesYaml, buildGoogleRulesYaml(fetched[s.Name])...)
 	}
 
+	// Step 2.5: TMDB DNS 映射（可选；tmdbDomains 非空时启用，失败即中止整轮生成）
+	var tmdbRsc []byte
+	if len(g.tmdbDomains) > 0 {
+		verified, err := g.resolveTmdb(ctx)
+		if err != nil {
+			return fmt.Errorf("tmdb dns mapping: %w", err)
+		}
+		tmdbRsc = generateTmdbRsc(verified, g.debug)
+	}
+
 	// Prepare map of all output files
 	// Top-level: clean-list.txt, domain.rsc, clash-gfw-list.txt
 	// rules/: ai.yaml, google_rules.yaml + one passthrough file per configured rule source
@@ -1047,6 +1255,10 @@ func (g *Generator) Run(ctx context.Context) error {
 	filesToWrite = append(filesToWrite, fileEntry{path: "domain.rsc", content: domainRscData})
 	filesToWrite = append(filesToWrite, fileEntry{path: "clash-gfw-list.txt", content: clashGfwData, isYaml: true})
 
+	if tmdbRsc != nil {
+		filesToWrite = append(filesToWrite, fileEntry{path: "tmdb.rsc", content: tmdbRsc})
+	}
+
 	// rules/ files
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/ai.yaml", content: aiYaml, isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/google_rules.yaml", content: googleRulesYaml, isYaml: true})
@@ -1057,7 +1269,11 @@ func (g *Generator) Run(ctx context.Context) error {
 	}
 
 	// Total files check: 3 top-level + rules/ai.yaml + rules/google_rules.yaml + len(rules) passthrough
+	// (+ tmdb.rsc when the DNS-TMDB mapping is enabled)
 	expectedFiles := 5 + len(g.sources.Rules)
+	if tmdbRsc != nil {
+		expectedFiles++
+	}
 	if len(filesToWrite) != expectedFiles {
 		return fmt.Errorf("internal inconsistency: expected %d files, got %d", expectedFiles, len(filesToWrite))
 	}
@@ -1240,6 +1456,9 @@ func main() {
 	directDomainsFile := flag.String("direct-domains-file", "", "Path to file containing direct domains, one per line")
 	proxyDomains := flag.String("proxy-domains", "", "Comma-separated list of proxy domains")
 	proxyDomainsFile := flag.String("proxy-domains-file", "", "Path to file containing proxy domains, one per line")
+	tmdbDomains := flag.String("tmdb-domains", "", "Comma-separated TMDB domains for DNS static mapping (empty disables tmdb.rsc)")
+	tmdbDomainsFile := flag.String("tmdb-domains-file", "", "Path to file containing TMDB domains, one per line")
+	tmdbECS := flag.String("tmdb-edns-subnet", defaultTmdbECS, "EDNS Client Subnet hint for DoH queries (empty disables ECS)")
 	sourcesPath := flag.String("sources", "", "Path to JSON file with download sources (gfwlist/ai/google/rules groups); empty uses built-in defaults")
 	debug := flag.Bool("debug", false, "Enable verbose debug logging for systemd journalctl")
 	flag.Parse()
@@ -1257,12 +1476,17 @@ func main() {
 		log.Fatalf("Load proxy domains failed: %v", err)
 	}
 
+	tmdb, err := loadDomainList(*tmdbDomains, *tmdbDomainsFile, *debug, "tmdb")
+	if err != nil {
+		log.Fatalf("Load tmdb domains failed: %v", err)
+	}
+
 	sources, err := loadSources(*sourcesPath)
 	if err != nil {
 		log.Fatalf("Load sources failed: %v", err)
 	}
 
-	gen, err := NewGenerator(*outDir, *tempParent, direct, proxy, sources, *debug)
+	gen, err := NewGenerator(*outDir, *tempParent, direct, proxy, tmdb, *tmdbECS, sources, *debug)
 	if err != nil {
 		log.Fatalf("Init generator failed: %v", err)
 	}

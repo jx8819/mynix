@@ -11,6 +11,13 @@ let
     lib.concatStringsSep "\n" cfg.proxyDomains + "\n"
   );
 
+  tmdbDomainsFile = pkgs.writeText "rules-sync-tmdb-domains.txt" (
+    lib.concatStringsSep "\n" cfg.tmdbDns.domains + "\n"
+  );
+
+  tmdbFlags = lib.optionalString cfg.tmdbDns.enable
+    " -tmdb-domains-file ${tmdbDomainsFile} -tmdb-edns-subnet ${cfg.tmdbDns.ednsClientSubnet}";
+
   sourcesFile = pkgs.writeText "rules-sync-sources.json" (builtins.toJSON {
     gfwlist = cfg.gfwlistSources;
     ai = cfg.aiSources;
@@ -62,6 +69,24 @@ in
       type = lib.types.listOf lib.types.str;
       default = [];
       description = "Custom proxy domains to include in proxy rules";
+    };
+
+    tmdbDns = {
+      enable = lib.mkEnableOption ''
+        DNS-TMDB 静态映射生成（tmdb.rsc）：用大厂 DoH（Google/Cloudflare）取 TMDB 域名
+        真实 A 记录，经 TLS SNI 握手逐 IP 校验后输出 RouterOS /ip dns static 映射，
+        让全网直连 TMDB（思路源自 github.com/myzhongqiang/DNS-TMDB，解析通道换大厂并加硬校验）
+      '';
+      domains = lib.mkOption {
+        type = lib.types.listOf lib.types.str;
+        default = [ "api.themoviedb.org" "image.tmdb.org" "www.themoviedb.org" ];
+        description = "TMDB 域名列表（默认即 DNS-TMDB 的三个域名），可增删。";
+      };
+      ednsClientSubnet = lib.mkOption {
+        type = lib.types.str;
+        default = "115.192.0.0/11";
+        description = "DoH 查询的 EDNS Client Subnet 提示（只影响 CDN 选边，不影响正确性）；空字符串关闭。";
+      };
     };
 
     gfwlistSources = lib.mkOption {
@@ -180,7 +205,7 @@ in
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -sources ${sourcesFile}${lib.optionalString cfg.debug " -debug"}";
+        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -sources ${sourcesFile}${tmdbFlags}${lib.optionalString cfg.debug " -debug"}";
 
         # 显式指定 UMask 为 0022，保证目录 0755 与文件 0644 的权限确定性
         UMask = "0022";
