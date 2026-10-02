@@ -22,6 +22,10 @@ let
   tmdbFlags = lib.optionalString cfg.tmdbDns.enable
     " -tmdb-domains-file ${tmdbDomainsFile} -tmdb-edns-subnet ${cfg.tmdbDns.ednsClientSubnet}";
 
+  # target 为空 = 不生成 domain.dnsmasq.conf；端口始终显式传给生成器
+  dnsmasqFlags = lib.optionalString (cfg.dnsmasqForward.target != "")
+    " -dnsmasq-forward-target ${cfg.dnsmasqForward.target} -dnsmasq-forward-port ${toString cfg.dnsmasqForward.port}";
+
   sourcesFile = pkgs.writeText "rules-sync-sources.json" (builtins.toJSON {
     gfwlist = cfg.gfwlistSources;
     ai = cfg.aiSources;
@@ -96,6 +100,26 @@ in
         type = lib.types.str;
         default = "115.192.0.0/11";
         description = "DoH 查询的 EDNS Client Subnet 提示（只影响 CDN 选边，不影响正确性）；空字符串关闭。";
+      };
+    };
+
+    # dnsmasq 域名转发输出（domain.dnsmasq.conf）：与 domain.rsc 同一批域名的
+    # dnsmasq 等价格式（server=/domain/目标#端口），供 OpenWrt/dnsmasq 站点使用。
+    # target 为空 = 不生成该文件；转发目标与端口按站点实际情况填。
+    dnsmasqForward = {
+      target = lib.mkOption {
+        type = lib.types.str;
+        default = "";
+        description = ''
+          dnsmasq 域名转发目标（IP 或主机名）。非空时生成 domain.dnsmasq.conf，
+          每行 `server=/域名/目标#端口`；留空则不生成。看情况再填。
+        '';
+        example = "10.10.10.1";
+      };
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 53;
+        description = "dnsmasq 域名转发端口（拼在目标后，如 目标#5353）。";
       };
     };
 
@@ -215,7 +239,7 @@ in
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -clean-ip-domains-file ${cleanIpDomainsFile} -sources ${sourcesFile}${tmdbFlags}${lib.optionalString cfg.debug " -debug"}";
+        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -clean-ip-domains-file ${cleanIpDomainsFile} -sources ${sourcesFile}${tmdbFlags}${dnsmasqFlags}${lib.optionalString cfg.debug " -debug"}";
 
         # 显式指定 UMask 为 0022，保证目录 0755 与文件 0644 的权限确定性
         UMask = "0022";
