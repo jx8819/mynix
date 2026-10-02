@@ -753,6 +753,70 @@ func generateDnsmasqForward(domains []string, target string, port int, debug boo
 	return res
 }
 
+// telegramCidrURL is Telegram's official public CIDR list (IPv4 + IPv6), the same
+// source the RouterOS telegram-address-list-update script consumes.
+const telegramCidrURL = "https://core.telegram.org/resources/cidr.txt"
+
+// telegramFetchKey is the reserved slot in the concurrent fetch map. The leading
+// underscores keep it from colliding with user-configured source names.
+const telegramFetchKey = "__telegram_cidr__"
+
+// parseTelegramCidrs splits the official cidr.txt into IPv4 and IPv6 CIDR lines.
+// Blank lines and #-comments are dropped. No port/protocol special-casing: only
+// the plain address ranges are needed (Telegram voice/UDP handling is out of scope).
+func parseTelegramCidrs(raw []byte, debug bool) (v4, v6 []string) {
+	for _, line := range splitRawLines(raw) {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.Contains(line, ":") {
+			v6 = append(v6, line)
+		} else {
+			v4 = append(v4, line)
+		}
+	}
+	if debug {
+		log.Printf("[DEBUG] telegram: parsed %d IPv4 + %d IPv6 CIDRs", len(v4), len(v6))
+	}
+	return v4, v6
+}
+
+// generateTelegramRsc renders a RouterOS address-list import for the telegram list.
+// Entries carry comment=telegram-official-managed so entries manually tagged
+// telegram-manual-* survive the swap, matching the live RouterOS script's contract.
+func generateTelegramRsc(v4, v6 []string, debug bool) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("/ip firewall address-list remove [find where list=telegram comment=telegram-official-managed]\n")
+	buf.WriteString("/ip firewall address-list\n")
+	for _, cidr := range append(append([]string{}, v4...), v6...) {
+		fmt.Fprintf(&buf, "add list=telegram address=%s comment=telegram-official-managed\n", cidr)
+	}
+	res := buf.Bytes()
+	if debug {
+		log.Printf("[DEBUG] telegram.rsc: generated %d address-list entries (%d bytes)", len(v4)+len(v6), len(res))
+	}
+	return res
+}
+
+// generateTelegramMihomo renders a mihomo rule-provider payload for the telegram
+// address ranges (the dnsmasq/mihomo counterpart of telegram.rsc).
+func generateTelegramMihomo(v4, v6 []string, debug bool) []byte {
+	var buf bytes.Buffer
+	buf.WriteString("payload:\n")
+	for _, cidr := range v4 {
+		fmt.Fprintf(&buf, "  - IP-CIDR,%s,no-resolve\n", cidr)
+	}
+	for _, cidr := range v6 {
+		fmt.Fprintf(&buf, "  - IP-CIDR6,%s,no-resolve\n", cidr)
+	}
+	res := buf.Bytes()
+	if debug {
+		log.Printf("[DEBUG] telegram-mihomo.yaml: generated %d payload items (%d bytes)", len(v4)+len(v6), len(res))
+	}
+	return res
+}
+
 func generateClashDomainList(domains []string, listName string, debug bool) []byte {
 	var clashGfwBuf bytes.Buffer
 	clashGfwBuf.WriteString("payload:\n")
@@ -1176,6 +1240,8 @@ func (g *Generator) Run(ctx context.Context) error {
 	for _, s := range g.sources.Rules {
 		urls[s.Name] = s.URL
 	}
+	// Telegram official CIDR list (transformed into telegram.rsc + telegram-mihomo.yaml)
+	urls[telegramFetchKey] = telegramCidrURL
 
 	fetched := make(map[string][]byte, len(urls))
 	var mu sync.Mutex
@@ -1295,6 +1361,10 @@ func (g *Generator) Run(ctx context.Context) error {
 	if g.dnsmasqTarget != "" {
 		filesToWrite = append(filesToWrite, fileEntry{path: "domain.dnsmasq.conf", content: generateDnsmasqForward(cleanList, g.dnsmasqTarget, g.dnsmasqPort, g.debug)})
 	}
+	telegramV4, telegramV6 := parseTelegramCidrs(fetched[telegramFetchKey], g.debug)
+	filesToWrite = append(filesToWrite,
+		fileEntry{path: "telegram.rsc", content: generateTelegramRsc(telegramV4, telegramV6, g.debug)},
+		fileEntry{path: "telegram-mihomo.yaml", content: generateTelegramMihomo(telegramV4, telegramV6, g.debug), isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "clash-gfw-list.txt", content: clashGfwData, isYaml: true})
 
 	if tmdbRsc != nil {
@@ -1312,7 +1382,8 @@ func (g *Generator) Run(ctx context.Context) error {
 	}
 
 	// Total files check: 3 top-level + rules/clean-ip.txt + rules/ai.yaml + rules/google_rules.yaml + len(rules) passthrough
-	// (+ tmdb.rsc when the DNS-TMDB mapping is enabled, + domain.dnsmasq.conf when dnsmasq forwarding is enabled)
+	// (+ tmdb.rsc when the DNS-TMDB mapping is enabled, + domain.dnsmasq.conf when dnsmasq forwarding is enabled,
+	//  + telegram.rsc + telegram-mihomo.yaml always)
 	expectedFiles := 6 + len(g.sources.Rules)
 	if tmdbRsc != nil {
 		expectedFiles++
@@ -1320,6 +1391,7 @@ func (g *Generator) Run(ctx context.Context) error {
 	if g.dnsmasqTarget != "" {
 		expectedFiles++
 	}
+	expectedFiles += 2
 	if len(filesToWrite) != expectedFiles {
 		return fmt.Errorf("internal inconsistency: expected %d files, got %d", expectedFiles, len(filesToWrite))
 	}

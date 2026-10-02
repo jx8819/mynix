@@ -241,6 +241,25 @@ func TestNewGeneratorRejectsBadDnsmasqPort(t *testing.T) {
 	}
 }
 
+func TestTelegramConverters(t *testing.T) {
+	v4, v6 := parseTelegramCidrs([]byte("# comment\n91.108.4.0/22\n\n2001:b68:4001::/48\n149.154.160.0/20\n"), false)
+	if len(v4) != 2 || len(v6) != 1 {
+		t.Fatalf("parseTelegramCidrs got v4=%v v6=%v", v4, v6)
+	}
+	rsc := string(generateTelegramRsc(v4, v6, false))
+	if !strings.Contains(rsc, "add list=telegram address=91.108.4.0/22 comment=telegram-official-managed") {
+		t.Errorf("telegram.rsc missing managed entry: %s", rsc)
+	}
+	if !strings.Contains(rsc, "remove [find where list=telegram comment=telegram-official-managed]") {
+		t.Errorf("telegram.rsc must remove only managed entries: %s", rsc)
+	}
+	mihomo := string(generateTelegramMihomo(v4, v6, false))
+	if !strings.Contains(mihomo, "  - IP-CIDR,149.154.160.0/20,no-resolve") ||
+		!strings.Contains(mihomo, "  - IP-CIDR6,2001:b68:4001::/48,no-resolve") {
+		t.Errorf("telegram-mihomo.yaml wrong payload: %s", mihomo)
+	}
+}
+
 func TestResolveTmdb(t *testing.T) {
 	// 假 DoH：任何域名都答 127.0.0.1（TLS 校验端口指向本地假 TLS 服务器）
 	doh := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
