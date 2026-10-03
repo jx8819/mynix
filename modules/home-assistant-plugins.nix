@@ -27,7 +27,7 @@ in
       default = false;
       description = ''
         Enable XiaoMi/ha_xiaomi_home integration (official Xiaomi Miot).
-        Uses nixpkgs home-assistant-custom-components.xiaomi_home.
+        Uses the version-pinned pkgs.ha-xiaomi-home package from mynix.
         Requires extraComponents: ffmpeg, zeroconf.
       '';
     };
@@ -42,12 +42,12 @@ in
   config = lib.mkIf cfg.enable {
     services.home-assistant = {
       customComponents =
-        lib.optional cfg.xiaomiHome pkgs.home-assistant-custom-components.xiaomi_home
+        lib.optional cfg.xiaomiHome pkgs.ha-xiaomi-home
         ++ lib.optional cfg.xiaomiMiot pkgs.home-assistant-custom-components.xiaomi_miot
         ++ lib.optional cfg.dyson pkgs.ha-dyson
         ++ lib.optional cfg.cololight pkgs.ha-cololight;
 
-      # xiaomi_home 依赖 ffmpeg + zeroconf（见 nixpkgs package 注释）
+      # ha-xiaomi-home 依赖 ffmpeg + zeroconf
       extraComponents =
         lib.optionals cfg.xiaomiHome [ "ffmpeg" "zeroconf" ]
         ++ lib.optionals cfg.dyson [ "bluetooth" ]

@@ -1,5 +1,5 @@
 {
-  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、rules-sync（ros-rules-generator）NixOS module、mesh-guardian（Xiaomi Mesh 有线中继看门狗）NixOS module、hdsky-checkin（HDSky 自动签到）NixOS module、Herdr NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb / ros-rules-generator / mesh-guardian / hdsky-checkin / herdr / ddddocr）。机制公开，私密值全在调用方 options。";
+  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、rules-sync（ros-rules-generator）NixOS module、mesh-guardian（Xiaomi Mesh 有线中继看门狗）NixOS module、hdsky-checkin（HDSky 自动签到）NixOS module、Herdr NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb / ros-rules-generator / mesh-guardian / hdsky-checkin / herdr / ddddocr / ha-xiaomi-home）。机制公开，私密值全在调用方 options。";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
@@ -47,6 +47,8 @@
         ha-dyson = prev.callPackage ./pkgs/ha-dyson { };
         # Home Assistant 自定义组件（Cololight，domain: cololight）
         ha-cololight = prev.callPackage ./pkgs/ha-cololight { };
+        # Home Assistant 官方小米集成（domain: xiaomi_home）
+        ha-xiaomi-home = prev.callPackage ./pkgs/ha-xiaomi-home { };
       };
 
       # 临时使用：nix run github:jx8819/mynix#<name>
@@ -64,7 +66,8 @@
           herdr
           ddddocr
           ha-dyson
-          ha-cololight;
+          ha-cololight
+          ha-xiaomi-home;
       };
     };
 }
