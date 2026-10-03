@@ -26,6 +26,8 @@
       nixosModules.hdsky-checkin = import ./modules/hdsky-checkin.nix;
       # Herdr terminal workspace manager NixOS module
       nixosModules.herdr = import ./modules/herdr.nix;
+      # Home Assistant custom components module
+      nixosModules.home-assistant-plugins = import ./modules/home-assistant-plugins.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = final: prev: {
@@ -41,6 +43,10 @@
         herdr = prev.callPackage ./pkgs/herdr { };
         # python 库（nixpkgs 未收录），hdsky-checkin 的依赖；也可单独用
         ddddocr = prev.python3.pkgs.callPackage ./pkgs/ddddocr { };
+        # Home Assistant 自定义组件（Dyson，domain: dyson_local）
+        ha-dyson = prev.callPackage ./pkgs/ha-dyson { };
+        # Home Assistant 自定义组件（Cololight，domain: cololight）
+        ha-cololight = prev.callPackage ./pkgs/ha-cololight { };
       };
 
       # 临时使用：nix run github:jx8819/mynix#<name>
@@ -56,7 +62,9 @@
           mesh-guardian
           hdsky-checkin
           herdr
-          ddddocr;
+          ddddocr
+          ha-dyson
+          ha-cololight;
       };
     };
 }
