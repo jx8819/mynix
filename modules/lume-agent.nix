@@ -118,9 +118,9 @@ in
         Restart = "always";
         RestartSec = "10s";
 
-        # 运行时目录：/run/vpsmon
-        RuntimeDirectory = "vpsmon";
-        RuntimeDirectoryMode = "0750";
+        # 状态与持久化目录：/var/lib/vpsmon
+        StateDirectory = "vpsmon";
+        StateDirectoryMode = "0750";
 
         # 安全沙箱 (符合上游设计契约)
         NoNewPrivileges = true;
@@ -166,12 +166,12 @@ in
               probe_interval_seconds: $prbInt,
               services: $srvs,
               probes: $prbs,
-              spool_path: "/run/vpsmon/spool.json"
-            }' > /run/vpsmon/config.json
-          chmod 600 /run/vpsmon/config.json
+              spool_path: "/var/lib/vpsmon/spool.json"
+            }' > /var/lib/vpsmon/config.json
+          chmod 600 /var/lib/vpsmon/config.json
         '';
 
-        ExecStart = "${cfg.package}/bin/lume-agent --config /run/vpsmon/config.json";
+        ExecStart = "${cfg.package}/bin/lume-agent --config /var/lib/vpsmon/config.json";
       };
     };
   };
