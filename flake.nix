@@ -30,6 +30,8 @@
       nixosModules.home-assistant-plugins = import ./modules/home-assistant-plugins.nix;
       # Miloco agent webhook → OMP bridge（只给米家设备/场景工具）NixOS module
       nixosModules.miloco-omp-agent = import ./modules/miloco-omp-agent.nix;
+      # Lume VPS 探针监控 Agent NixOS module
+      nixosModules.lume-agent = import ./modules/lume-agent.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = final: prev: {
@@ -55,6 +57,8 @@
         ha-xiaomi-home = prev.callPackage ./pkgs/ha-xiaomi-home { };
         # Home Assistant 自定义组件（Home Connect Local，domain: homeconnect_ws）
         ha-homeconnect-local = prev.callPackage ./pkgs/ha-homeconnect-local { };
+        # Lume VPS 监控客户端 (vpsmon-agent)
+        lume-agent = prev.callPackage ./pkgs/lume-agent { };
       };
 
       # 临时使用：nix run github:jx8819/mynix#<name>
@@ -75,7 +79,8 @@
           ha-dyson
           ha-cololight
           ha-xiaomi-home
-          ha-homeconnect-local;
+          ha-homeconnect-local
+          lume-agent;
       };
     };
 }
