@@ -28,6 +28,8 @@
       nixosModules.herdr = import ./modules/herdr.nix;
       # Home Assistant custom components module
       nixosModules.home-assistant-plugins = import ./modules/home-assistant-plugins.nix;
+      # Miloco agent webhook → OMP bridge（只给米家设备/场景工具）NixOS module
+      nixosModules.miloco-omp-agent = import ./modules/miloco-omp-agent.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = final: prev: {
@@ -41,6 +43,8 @@
         mesh-guardian = prev.callPackage ./pkgs/mesh-guardian { };
         hdsky-checkin = prev.callPackage ./pkgs/hdsky-checkin { };
         herdr = prev.callPackage ./pkgs/herdr { };
+        # Miloco agent webhook → OMP bridge（仅米家设备/场景工具）
+        miloco-omp-agent = prev.callPackage ./pkgs/miloco-omp-agent { };
         # python 库（nixpkgs 未收录），hdsky-checkin 的依赖；也可单独用
         ddddocr = prev.python3.pkgs.callPackage ./pkgs/ddddocr { };
         # Home Assistant 自定义组件（Dyson，domain: dyson_local）
@@ -64,6 +68,7 @@
           mesh-guardian
           hdsky-checkin
           herdr
+          miloco-omp-agent
           ddddocr
           ha-dyson
           ha-cololight
