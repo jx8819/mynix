@@ -164,7 +164,7 @@ in
               secret: $secret,
               report_interval_seconds: $repInt,
               probe_interval_seconds: $prbInt,
-              services: $srvs,
+              services: ($srvs | map({name: ., label: ., severity: "P1"})),
               probes: $prbs,
               spool_path: "/var/lib/vpsmon/spool.json"
             }' > /var/lib/vpsmon/config.json
