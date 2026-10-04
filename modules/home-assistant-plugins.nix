@@ -37,12 +37,19 @@ in
       default = false;
       description = "Enable al-one/xiaomi_miot integration (alternative to xiaomiHome).";
     };
+
+    homeconnectLocal = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = "Enable chris-mc1/homeconnect_local_hass integration (Siemens/Bosch Home Connect Local).";
+    };
   };
 
   config = lib.mkIf cfg.enable {
     services.home-assistant = {
       customComponents =
         lib.optional cfg.xiaomiHome pkgs.ha-xiaomi-home
+        ++ lib.optional cfg.homeconnectLocal pkgs.ha-homeconnect-local
         ++ lib.optional cfg.xiaomiMiot pkgs.home-assistant-custom-components.xiaomi_miot
         ++ lib.optional cfg.dyson pkgs.ha-dyson
         ++ lib.optional cfg.cololight pkgs.ha-cololight;
@@ -50,6 +57,7 @@ in
       # ha-xiaomi-home 依赖 ffmpeg + zeroconf
       extraComponents =
         lib.optionals cfg.xiaomiHome [ "ffmpeg" "zeroconf" ]
+        ++ lib.optionals cfg.homeconnectLocal [ "zeroconf" "file_upload" ]
         ++ lib.optionals cfg.dyson [ "bluetooth" ]
         ++ lib.optionals cfg.cololight [ ];
     };

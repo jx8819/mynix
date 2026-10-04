@@ -53,6 +53,8 @@
         ha-cololight = prev.callPackage ./pkgs/ha-cololight { };
         # Home Assistant 官方小米集成（domain: xiaomi_home）
         ha-xiaomi-home = prev.callPackage ./pkgs/ha-xiaomi-home { };
+        # Home Assistant 自定义组件（Home Connect Local，domain: homeconnect_ws）
+        ha-homeconnect-local = prev.callPackage ./pkgs/ha-homeconnect-local { };
       };
 
       # 临时使用：nix run github:jx8819/mynix#<name>
@@ -72,7 +74,8 @@
           ddddocr
           ha-dyson
           ha-cololight
-          ha-xiaomi-home;
+          ha-xiaomi-home
+          ha-homeconnect-local;
       };
     };
 }
