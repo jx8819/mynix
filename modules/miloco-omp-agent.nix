@@ -220,6 +220,7 @@ in
 
     systemd.services.miloco-omp-agent = {
       description = "Miloco agent webhook → OMP bridge (Mi Home device tools only)";
+      wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       serviceConfig = {
