@@ -21,6 +21,10 @@ buildNpmPackage rec {
   npmBuildScript = "build:mcp";
   npmFlags = [ "--ignore-scripts" ];
 
+  # capabilityValidation.ts 的 step 对齐检查用整数取模，浮点 step（0.1）下把
+  # 合法温度阈值全判为"超出范围"，任何含浮点阈值的规则都无法 update/create。
+  patches = [ ./0001-fix-float-step-check.patch ];
+
   nativeBuildInputs = [ makeWrapper ];
 
   installPhase = ''
