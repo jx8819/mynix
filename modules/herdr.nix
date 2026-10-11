@@ -48,9 +48,7 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ../pkgs/herdr { };
-      defaultText = lib.literalExpression "pkgs.herdr";
-      description = "The Herdr package to install system-wide.";
+      description = "The Herdr package to install system-wide; select an upstream package in the caller's private configuration.";
     };
 
     users = lib.mkOption {

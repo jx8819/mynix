@@ -1,5 +1,5 @@
 {
-  description = "jx8819 的共享 Nix 库：omp maxwork 扩展、ompweb NixOS module、rules-sync（ros-rules-generator）NixOS module、mesh-guardian（Xiaomi Mesh 有线中继看门狗）NixOS module、hdsky-checkin（HDSky 自动签到）NixOS module、Herdr NixOS module、自建包（mktxp / nut-exporter / perftest / sas3ircu / yacd-meta / ompweb / ros-rules-generator / mesh-guardian / hdsky-checkin / herdr / oh-my-sage / ddddocr / ha-xiaomi-home）。机制公开，私密值全在调用方 options。";
+  description = "jx8819 的共享 Nix 库：pkgs/ 打包可公开复用的软件，modules/ 定义可复用的 NixOS 选项；部署与私密值留给调用方。";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
@@ -13,7 +13,7 @@
     in
     {
       # maxwork 全力模式扩展（/maxwork）
-      nixosModules.default = import ./module.nix;
+      nixosModules.default = import ./modules/omp-maxwork.nix;
       # ompweb Web UI NixOS module
       nixosModules.ompweb = import ./modules/ompweb.nix;
       # Supermicro IPMI 风扇调速 NixOS module
@@ -44,7 +44,6 @@
         ros-rules-generator = prev.callPackage ./pkgs/ros-rules-generator { };
         mesh-guardian = prev.callPackage ./pkgs/mesh-guardian { };
         hdsky-checkin = prev.callPackage ./pkgs/hdsky-checkin { };
-        herdr = prev.callPackage ./pkgs/herdr { };
         oh-my-sage = prev.callPackage ./pkgs/oh-my-sage { };
         # Miloco agent webhook → OMP bridge（仅米家设备/场景工具）
         miloco-omp-agent = prev.callPackage ./pkgs/miloco-omp-agent { };
@@ -74,7 +73,6 @@
           ompweb
           mesh-guardian
           hdsky-checkin
-          herdr
           oh-my-sage
           miloco-omp-agent
           ddddocr

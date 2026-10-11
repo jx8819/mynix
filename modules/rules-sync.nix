@@ -98,7 +98,7 @@ in
       };
       ednsClientSubnet = lib.mkOption {
         type = lib.types.str;
-        default = "115.192.0.0/11";
+        default = "";
         description = "DoH 查询的 EDNS Client Subnet 提示（只影响 CDN 选边，不影响正确性）；空字符串关闭。";
       };
     };

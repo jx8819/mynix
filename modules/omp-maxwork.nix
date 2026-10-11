@@ -100,7 +100,7 @@ in
     # agentDir 通常在持久数据盘上、不受 Nix 管理，用 activation 幂等安装。
     # maxwork-state.json 是用户运行时状态，不由本模块管理。
     system.activationScripts.ompMaxwork = ''
-      install -D -m 0644 -o ${cfg.owner} -g ${cfg.group} ${./extension/maxwork.ts} ${cfg.agentDir}/extensions/maxwork.ts
+      install -D -m 0644 -o ${cfg.owner} -g ${cfg.group} ${../extension/maxwork.ts} ${cfg.agentDir}/extensions/maxwork.ts
       install -D -m 0640 -o ${cfg.owner} -g ${cfg.group} ${configJson} ${cfg.agentDir}/maxwork.config.json
     '';
   };

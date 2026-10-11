@@ -46,16 +46,9 @@ in
 
     # ── Authentication ────────────────────────────────────────────────────────
 
-    passwordSecret = lib.mkOption {
+    passwordFile = lib.mkOption {
       type = lib.types.str;
-      default = "secrets/mesh_guardian_password";
-      description = "sops secret key that holds the AP admin password.";
-    };
-
-    sopsFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = "sops YAML file that contains passwordSecret. Required; no default because the file is in the caller's private config.";
+      description = "Path to the private AP admin password file, supplied by the deployment.";
     };
 
     # ── Timing ────────────────────────────────────────────────────────────────
@@ -174,20 +167,11 @@ in
 
     assertions = [
       {
-        assertion = cfg.sopsFile != null;
-        message = "services.meshGuardian.sopsFile must be set to the sops YAML containing the AP password.";
-      }
-      {
         assertion = cfg.satellites != [];
         message = "services.meshGuardian.satellites must list at least one AP.";
       }
     ];
 
-    sops.secrets.${cfg.passwordSecret} = {
-      sopsFile = cfg.sopsFile;
-      owner = "mesh-guardian";
-      mode = "0400";
-    };
 
     users.users.mesh-guardian = {
       isSystemUser = true;
@@ -214,7 +198,7 @@ in
           "${cfg.package}/bin/mesh-guardian"
           "--controller-ip" cfg.controllerIp
           satelliteArgs
-          "--password-file" "/run/secrets/${cfg.passwordSecret}"
+          "--password-file" cfg.passwordFile
           "--check-interval"   (toString cfg.checkInterval)
           "--wireless-dwell"   (toString cfg.wirelessDwell)
           "--reboot-wait"      (toString cfg.rebootWait)

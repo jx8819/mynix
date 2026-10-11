@@ -57,7 +57,6 @@ in
 
     endpoint = lib.mkOption {
       type = lib.types.str;
-      default = "https://monitor.xjn819.com/api/v1/report";
       description = "Lume 后端上报 API 地址。";
     };
 

@@ -20,20 +20,9 @@ in
 
     # ── Authentication ────────────────────────────────────────────────────────
 
-    cookieSecret = lib.mkOption {
+    cookieFile = lib.mkOption {
       type = lib.types.str;
-      default = "secrets/hdsky_cookie";
-      description = ''
-        sops secret key holding the HDSky Cookie, as one line:
-        `c_secure_login=...; c_secure_pass=...; c_secure_ssl=...; c_secure_tracker_ssl=...; c_secure_uid=...`
-      '';
-      example = "secrets/hdsky_cookie";
-    };
-
-    sopsFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = "sops YAML file that contains cookieSecret and mailToSecret. Required; no default because the file is in the caller's private config.";
+      description = "Path to the private HDSky Cookie file, supplied by the deployment.";
     };
 
     userAgent = lib.mkOption {
@@ -45,15 +34,10 @@ in
 
     # ── Failure alerting ──────────────────────────────────────────────────────
 
-    mailToSecret = lib.mkOption {
+    mailToFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = "secrets/hdsky_mail_to";
-      description = ''
-        sops secret key holding the alert recipient address. Set to null to
-        disable failure alerts. Like the cookie, the address itself is kept out
-        of the plaintext config.
-      '';
-      example = "secrets/hdsky_mail_to";
+      default = null;
+      description = "Path to the private failure-alert recipient file; null disables failure alerts.";
     };
 
     mailFrom = lib.mkOption {
@@ -103,28 +87,11 @@ in
 
     assertions = [
       {
-        assertion = cfg.sopsFile != null;
-        message = "services.hdskyCheckin.sopsFile must be set to the sops YAML containing the HDSky cookie.";
-      }
-      {
-        assertion = cfg.mailToSecret == null || cfg.mailFrom != "";
-        message = "services.hdskyCheckin.mailFrom must be set when mailToSecret is used (postfix needs a sender for generic-map rewriting).";
+        assertion = cfg.mailToFile == null || cfg.mailFrom != "";
+        message = "services.hdskyCheckin.mailFrom must be set when mailToFile is used (postfix needs a sender for generic-map rewriting).";
       }
     ];
 
-    sops.secrets = {
-      ${cfg.cookieSecret} = {
-        sopsFile = cfg.sopsFile;
-        owner = "hdsky-checkin";
-        mode = "0400";
-      };
-    } // lib.optionalAttrs (cfg.mailToSecret != null) {
-      ${cfg.mailToSecret} = {
-        sopsFile = cfg.sopsFile;
-        owner = "hdsky-checkin";
-        mode = "0400";
-      };
-    };
 
     users.users.hdsky-checkin = {
       isSystemUser = true;
@@ -146,13 +113,13 @@ in
         ExecStart = lib.concatStringsSep " " (
           [
             "${cfg.package}/bin/hdsky-checkin"
-            "--cookie-file" "/run/secrets/${cfg.cookieSecret}"
+            "--cookie-file" cfg.cookieFile
             "--user-agent" (lib.escapeShellArg cfg.userAgent)
             "--max-attempts" (toString cfg.maxAttempts)
             "--timeout" (toString cfg.timeout)
           ]
-          ++ lib.optional (cfg.mailToSecret != null)
-            "--mail-to-file /run/secrets/${cfg.mailToSecret}"
+          ++ lib.optional (cfg.mailToFile != null)
+            "--mail-to-file ${cfg.mailToFile}"
           ++ lib.optional (cfg.mailFrom != "") "--mail-from ${cfg.mailFrom}"
           ++ [ "--sendmail" cfg.sendmail ]
         );

@@ -27,19 +27,16 @@ in
 
     user = lib.mkOption {
       type = lib.types.str;
-      default = "xjn";
       description = "User to run ompweb as";
     };
 
     dataDir = lib.mkOption {
       type = lib.types.path;
-      default = "/mnt/Media/Settings/agent/omp/webui";
       description = "Data persistence directory";
     };
 
     agentDir = lib.mkOption {
       type = lib.types.path;
-      default = "/mnt/Media/Settings/agent/omp";
       description = "OMP agent directory (sessions, memories, config)";
     };
 
@@ -61,16 +58,9 @@ in
       description = "是否在防火墙开放 port。仅当确需绕过反代直连时才开；对外入口应统一走反代（TLS + 密码）。";
     };
 
-    passwordSecret = lib.mkOption {
+    environmentFile = lib.mkOption {
       type = lib.types.str;
-      default = "secrets/ompweb_password";
-      description = "sops secret key for the web UI password (as written in the YAML file)";
-    };
-
-    sopsFile = lib.mkOption {
-      type = lib.types.nullOr lib.types.path;
-      default = null;
-      description = "sops file containing the password（必填，无默认值——密码文件属于调用方私有配置）";
+      description = "Path to a private EnvironmentFile supplying OMP_WEB_PASSWORD.";
     };
   };
 
@@ -78,12 +68,6 @@ in
     # 用户通常已在别处定义为 normal user，这里不重复创建；只需要确保组存在。
     users.groups.${cfg.user} = lib.mkIf (!builtins.hasAttr cfg.user config.users.users) { };
 
-    sops.secrets."${cfg.passwordSecret}" = lib.mkIf (cfg.sopsFile != null) {
-      sopsFile = cfg.sopsFile;
-      owner = cfg.user;
-      group = cfg.user;
-      mode = "0400";
-    };
 
     systemd.tmpfiles.rules = [
       "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.user} -"
@@ -113,7 +97,7 @@ in
         Group = cfg.user;
         Restart = "always";
         RestartSec = 5;
-        EnvironmentFile = config.sops.templates.ompweb-env.path;
+        EnvironmentFile = cfg.environmentFile;
         ExecStart = "${ompwebPkg}/bin/ompweb --hostname ${cfg.hostname} --port ${toString cfg.port}";
         # Plain chown/chmod directly avoids systemd-tmpfiles "unsafe path transition"
         # across /mnt/Media/Settings (xjn) -> agent (agent).
@@ -133,14 +117,6 @@ in
       };
     };
 
-    sops.templates.ompweb-env = {
-      owner = cfg.user;
-      group = cfg.user;
-      mode = "0400";
-      content = ''
-        OMP_WEB_PASSWORD=${config.sops.placeholder."${cfg.passwordSecret}"}
-      '';
-    };
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
   };
