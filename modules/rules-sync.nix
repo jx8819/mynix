@@ -22,9 +22,6 @@ let
   tmdbFlags = lib.optionalString cfg.tmdbDns.enable
     " -tmdb-domains-file ${tmdbDomainsFile} -tmdb-edns-subnet ${cfg.tmdbDns.ednsClientSubnet}";
 
-  # target 为空 = 不生成 domain.dnsmasq.conf；端口始终显式传给生成器
-  dnsmasqFlags = lib.optionalString (cfg.dnsmasqForward.target != "")
-    " -dnsmasq-forward-target ${cfg.dnsmasqForward.target} -dnsmasq-forward-port ${toString cfg.dnsmasqForward.port}";
 
   sourcesFile = pkgs.writeText "rules-sync-sources.json" (builtins.toJSON {
     gfwlist = cfg.gfwlistSources;
@@ -32,6 +29,9 @@ let
     google = cfg.googleSources;
     rules = cfg.ruleSources;
   });
+
+  dnsmasqForwardsFile = pkgs.writeText "rules-sync-dnsmasq-forwards.json"
+    (builtins.toJSON cfg.dnsmasqForwards);
 in
 {
   options.services.rulesSync = {
@@ -103,24 +103,30 @@ in
       };
     };
 
-    # dnsmasq 域名转发输出（domain.dnsmasq.conf）：与 domain.rsc 同一批域名的
-    # dnsmasq 等价格式（server=/domain/目标#端口），供 OpenWrt/dnsmasq 站点使用。
-    # target 为空 = 不生成该文件；转发目标与端口按站点实际情况填。
-    dnsmasqForward = {
-      target = lib.mkOption {
-        type = lib.types.str;
-        default = "";
-        description = ''
-          dnsmasq 域名转发目标（IP 或主机名）。非空时生成 domain.dnsmasq.conf，
-          每行 `server=/域名/目标#端口`；留空则不生成。看情况再填。
-        '';
-        example = "10.10.10.1";
-      };
-      port = lib.mkOption {
-        type = lib.types.port;
-        default = 53;
-        description = "dnsmasq 域名转发端口（拼在目标后，如 目标#5353）。";
-      };
+    # 同一份 clean-list 可生成多个 dnsmasq 上游配置；default 沿用原有文件名。
+    dnsmasqForwards = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule {
+        options = {
+          name = lib.mkOption {
+            type = lib.types.str;
+            description = "Output name: default writes domain.dnsmasq.conf; other names write domain.dnsmasq.<name>.conf.";
+          };
+          target = lib.mkOption {
+            type = lib.types.str;
+            description = "DNS upstream IP address or hostname for server=/domain/target#port entries.";
+          };
+          port = lib.mkOption {
+            type = lib.types.ints.between 1 65535;
+            description = "DNS upstream port.";
+          };
+        };
+      });
+      default = [];
+      example = [
+        { name = "default"; target = "127.0.0.1"; port = 1053; }
+        { name = "backup"; target = "192.0.2.53"; port = 53; }
+      ];
+      description = "Named dnsmasq forwarding variants generated from the same clean domain list; an empty list generates none.";
     };
 
     gfwlistSources = lib.mkOption {
@@ -207,6 +213,22 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = lib.all (forward: builtins.match "[A-Za-z0-9][A-Za-z0-9_-]*" forward.name != null) cfg.dnsmasqForwards;
+        message = "services.rulesSync.dnsmasqForwards names must contain only ASCII letters, digits, underscore, or hyphen, beginning with a letter or digit.";
+      }
+      {
+        assertion = builtins.length (lib.unique (map (forward: forward.name) cfg.dnsmasqForwards))
+          == builtins.length cfg.dnsmasqForwards;
+        message = "services.rulesSync.dnsmasqForwards names must be unique.";
+      }
+      {
+        assertion = lib.all (forward: forward.target != "") cfg.dnsmasqForwards;
+        message = "services.rulesSync.dnsmasqForwards targets must be non-empty IP addresses or hostnames.";
+      }
+    ];
+
     users.users.${cfg.user} = lib.mkIf (cfg.user == "github-sync") {
       isSystemUser = true;
       group = cfg.group;
@@ -239,7 +261,7 @@ in
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -clean-ip-domains-file ${cleanIpDomainsFile} -sources ${sourcesFile}${tmdbFlags}${dnsmasqFlags}${lib.optionalString cfg.debug " -debug"}";
+        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -clean-ip-domains-file ${cleanIpDomainsFile} -sources ${sourcesFile} -dnsmasq-forwards-file ${dnsmasqForwardsFile}${tmdbFlags}${lib.optionalString cfg.debug " -debug"}";
 
         # 显式指定 UMask 为 0022，保证目录 0755 与文件 0644 的权限确定性
         UMask = "0022";
