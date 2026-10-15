@@ -143,10 +143,10 @@ py.buildPythonApplication {
   # Matches the installed checkout; authentication, logs and QR artifacts live
   # under HOME/.miot-mcp at runtime, never in the fetched source or Nix store.
   src = fetchFromGitHub {
-    owner = "javen-yan";
+    owner = "jx8819";
     repo = "miot-mcp";
-    rev = "4f1cfbe549b0ab7b6faa2e27b16769ffc73c61d7";
-    hash = "sha256-LvrKehxvwvSB0evSSI19EYy3ulnYrQORgsHYjmSxeV0=";
+    rev = "ea7aee35aa99092f9e56be667ace1226872f5728";
+    hash = "sha256-umH+MIL/7VVVDw9HPe+R2AQozG8dj5d2f3VkZpZSYDE=";
   };
   # Keep QR ASCII fallback visible on stderr without mixing it into MCP stdout.
   postPatch = ''
