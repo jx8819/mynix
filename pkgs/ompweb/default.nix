@@ -1,11 +1,11 @@
 # ompweb publishes its compiled .next output, but not its node_modules. The
 # upstream release lockfile pins the exact production dependency graph.
-# package-lock.json is the unmodified upstream 0.5.0 lockfile at gitHead
-# 0541712e7ba541df23576f0b12e11b5a839dfe80.
+# package-lock.json is the unmodified upstream 0.5.1 lockfile at gitHead
+# 38bad6af80e9e5989a2603b0cf5b7b22c82adca3.
 { lib, stdenv, bash, nodejs, fetchurl, importNpmLock }:
 
 let
-  version = "0.5.0";
+  version = "0.5.1";
   lock = builtins.fromJSON (builtins.readFile ./package-lock.json);
   # This temporary manifest only installs dependencies; the published package
   # retains its scoped name. Nix derivation names cannot contain @ or /.
@@ -41,7 +41,7 @@ stdenv.mkDerivation {
 
   src = fetchurl {
     url = "https://registry.npmjs.org/@kahme247/ompweb/-/ompweb-${version}.tgz";
-    hash = "sha256-eP/35LelvG0LitCQTtLQvaQEojoriFM7H/viilcl15M=";
+    hash = "sha256-gJxLsmGpH9R1TSd6c8dShRFdP3jfVizUgJgvAHjP4nI=";
   };
 
   dontConfigure = true;

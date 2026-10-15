@@ -16,6 +16,8 @@
       nixosModules.default = import ./modules/omp-maxwork.nix;
       # ompweb Web UI NixOS module
       nixosModules.ompweb = import ./modules/ompweb.nix;
+      # omp 编码代理（can1357/oh-my-pi 源码打包）NixOS module
+      nixosModules.omp = import ./modules/omp.nix;
       # Supermicro IPMI 风扇调速 NixOS module
       nixosModules.fan-control = import ./modules/fan-control.nix;
       # ros-rules-generator 规则列表同步（systemd timer）NixOS module
@@ -41,6 +43,7 @@
         sas3ircu = prev.callPackage ./pkgs/sas3ircu { };
         yacd-meta = prev.callPackage ./pkgs/yacd-meta { };
         ompweb = prev.callPackage ./pkgs/ompweb { };
+        omp = prev.callPackage ./pkgs/omp { };
         ros-rules-generator = prev.callPackage ./pkgs/ros-rules-generator { };
         mesh-guardian = prev.callPackage ./pkgs/mesh-guardian { };
         hdsky-checkin = prev.callPackage ./pkgs/hdsky-checkin { };
@@ -72,6 +75,7 @@
           sas3ircu
           yacd-meta
           ompweb
+          omp
           mesh-guardian
           hdsky-checkin
           oh-my-sage
