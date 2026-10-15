@@ -127,6 +127,12 @@ let
     ];
     doCheck = false;
     pythonImportsCheck = [ "mijiaAPI" ];
+    # The upstream QR login URL uses print(), which corrupts stdio JSON-RPC.
+    # Wheel contents are available only after installation, not in postPatch.
+    postInstall = ''
+      substituteInPlace "$out/lib/python3.12/site-packages/mijiaAPI/apis.py" \
+        --replace-fail '        print(f"也可以访问链接查看二维码图片:' '        logger.info(f"也可以访问链接查看二维码图片:'
+    '';
   };
 in
 py.buildPythonApplication {
@@ -142,6 +148,12 @@ py.buildPythonApplication {
     rev = "4f1cfbe549b0ab7b6faa2e27b16769ffc73c61d7";
     hash = "sha256-LvrKehxvwvSB0evSSI19EYy3ulnYrQORgsHYjmSxeV0=";
   };
+  # Keep QR ASCII fallback visible on stderr without mixing it into MCP stdout.
+  postPatch = ''
+    substituteInPlace adapter/mijia_adapter.py \
+      --replace-fail 'qr.print_ascii(invert=True, tty=True)' 'qr.print_ascii(out=sys.stderr, invert=True, tty=True)' \
+      --replace-fail 'qr.print_ascii(invert=True, tty=False)' 'qr.print_ascii(out=sys.stderr, invert=True, tty=False)'
+  '';
 
   build-system = [ py.setuptools py.wheel ];
   dependencies = [ mcp mijiaAPI py.pillow py.qrcode ];
