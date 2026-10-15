@@ -6,8 +6,6 @@
 
 let
   cfg = config.services.ompweb;
-
-  ompwebPkg = pkgs.callPackage ../pkgs/ompweb { nodeModulesDir = cfg.nodeModulesDir; };
 in
 {
   options.services.ompweb = {
@@ -40,12 +38,6 @@ in
       description = "OMP agent directory (sessions, memories, config)";
     };
 
-    nodeModulesDir = lib.mkOption {
-      type = lib.types.str;
-      default = "/opt/ompweb/lib/node_modules";
-      description = "@kahme247/ompweb 完整 node_modules 所在目录（需预先 npm install 出依赖树）";
-    };
-
     extraReadWritePaths = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -68,14 +60,9 @@ in
     # 用户通常已在别处定义为 normal user，这里不重复创建；只需要确保组存在。
     users.groups.${cfg.user} = lib.mkIf (!builtins.hasAttr cfg.user config.users.users) { };
 
-
     systemd.tmpfiles.rules = [
       "d ${cfg.dataDir} 0750 ${cfg.user} ${cfg.user} -"
       "d ${cfg.agentDir} 0750 ${cfg.user} ${cfg.user} -"
-      "z ${cfg.agentDir}/config.yml 0640 ${cfg.user} ${cfg.user} - -"
-      "z ${cfg.agentDir}/models.yml 0640 ${cfg.user} ${cfg.user} - -"
-      "z ${cfg.agentDir}/agent.db 0640 ${cfg.user} ${cfg.user} - -"
-      "z ${cfg.agentDir}/models.db 0640 ${cfg.user} ${cfg.user} - -"
     ];
 
     systemd.services.ompweb = {
@@ -98,14 +85,30 @@ in
         Restart = "always";
         RestartSec = 5;
         EnvironmentFile = cfg.environmentFile;
-        ExecStart = "${ompwebPkg}/bin/ompweb --hostname ${cfg.hostname} --port ${toString cfg.port}";
-        # Plain chown/chmod directly avoids systemd-tmpfiles "unsafe path transition"
-        # across /mnt/Media/Settings (xjn) -> agent (agent).
-        # Runs as root before privilege drop.
-        ExecStartPre = [
-          "+${pkgs.coreutils}/bin/chown ${cfg.user}:${cfg.user} ${cfg.agentDir}/config.yml ${cfg.agentDir}/models.yml ${cfg.agentDir}/agent.db ${cfg.agentDir}/models.db"
-          "+${pkgs.coreutils}/bin/chmod 0640 ${cfg.agentDir}/config.yml ${cfg.agentDir}/models.yml ${cfg.agentDir}/agent.db ${cfg.agentDir}/models.db"
-        ];
+        ExecStart = "${pkgs.ompweb}/bin/ompweb --hostname ${cfg.hostname} --port ${toString cfg.port}";
+        # Create only missing SQLite files; never rewrite existing OMP state or
+        # follow the config.yml symlink installed by SOPS when setting ownership.
+        # Root pre-start bypasses the tmpfiles unsafe-path check on media mounts.
+        ExecStartPre = "+${pkgs.writeShellScript "ompweb-initialize-state" ''
+          set -eu
+          agent_dir=${lib.escapeShellArg (toString cfg.agentDir)}
+          ${pkgs.coreutils}/bin/install -d -m 0750 -o ${lib.escapeShellArg cfg.user} -g ${lib.escapeShellArg cfg.user} "$agent_dir"
+
+          for name in agent.db models.db; do
+            file="$agent_dir/$name"
+            if [ ! -e "$file" ] && [ ! -L "$file" ]; then
+              ( umask 027; set -C; : > "$file" )
+            fi
+          done
+
+          for name in config.yml models.yml agent.db models.db; do
+            file="$agent_dir/$name"
+            if [ -f "$file" ] && [ ! -L "$file" ]; then
+              ${pkgs.coreutils}/bin/chown ${lib.escapeShellArg "${cfg.user}:${cfg.user}"} "$file"
+              ${pkgs.coreutils}/bin/chmod 0640 "$file"
+            fi
+          done
+        ''}";
         WorkingDirectory = cfg.dataDir;
         # 本服务定位是「管理入口」，防护边界应在网络与认证层（反代密码/TLS），
         # 本单元沙箱仅作防误操作；如需收紧请按主机威胁模型自行加固。

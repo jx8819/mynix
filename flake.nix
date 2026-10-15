@@ -47,6 +47,7 @@
         oh-my-sage = prev.callPackage ./pkgs/oh-my-sage { };
         # Miloco agent webhook → OMP bridge（仅米家设备/场景工具）
         miloco-omp-agent = prev.callPackage ./pkgs/miloco-omp-agent { };
+        miot-mcp = prev.callPackage ./pkgs/miot-mcp { };
         # python 库（nixpkgs 未收录），hdsky-checkin 的依赖；也可单独用
         ddddocr = prev.python3.pkgs.callPackage ./pkgs/ddddocr { };
         # Home Assistant 自定义组件（Dyson，domain: dyson_local）
@@ -75,6 +76,7 @@
           hdsky-checkin
           oh-my-sage
           miloco-omp-agent
+          miot-mcp
           ddddocr
           ha-dyson
           ha-cololight

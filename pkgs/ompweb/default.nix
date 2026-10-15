@@ -1,14 +1,39 @@
-# ompweb — Web UI for the OMP coding agent（upstream: kahme247/ompweb）
-#
-# 上游 npm 包 @kahme247/ompweb 已包含编译好的 Next.js 输出（.next），
-# 直接从 npm registry 取 tarball 解包，避免在仓库里 vendor 26M 产物。
-#
-# 运行期依赖：nodeModulesDir 下必须有该包完整的 node_modules（`npm install`
-# 装出 @kahme247/ompweb 的依赖树）。Next 的依赖没有随包发布，包装器从那里启动。
-{ lib, stdenv, bash, nodejs, fetchurl, nodeModulesDir ? "/opt/ompweb/lib/node_modules" }:
+# ompweb publishes its compiled .next output, but not its node_modules. The
+# upstream release lockfile pins the exact production dependency graph.
+# package-lock.json is the unmodified upstream 0.5.0 lockfile at gitHead
+# 0541712e7ba541df23576f0b12e11b5a839dfe80.
+{ lib, stdenv, bash, nodejs, fetchurl, importNpmLock }:
 
 let
   version = "0.5.0";
+  lock = builtins.fromJSON (builtins.readFile ./package-lock.json);
+  # This temporary manifest only installs dependencies; the published package
+  # retains its scoped name. Nix derivation names cannot contain @ or /.
+  package = {
+    name = "ompweb";
+    inherit version;
+    inherit (lock.packages."") dependencies;
+  };
+  # The published bundle needs runtime dependencies, not the build/test tools.
+  productionLock = lock // {
+    name = package.name;
+    packages = (lib.filterAttrs (_: entry: !(entry.dev or false)) lock.packages) // {
+      "" = (builtins.removeAttrs lock.packages."" [ "devDependencies" ]) // {
+        inherit (package) name;
+      };
+    };
+  };
+  nodeModules = importNpmLock.buildNodeModules {
+    inherit nodejs package;
+    packageLock = productionLock;
+    derivationArgs = {
+      pname = "ompweb-node-modules";
+      inherit version;
+      npmInstallFlags = "--omit=dev --offline";
+      # Release packages already carry their native Linux binaries (notably SWC).
+      npmRebuildFlags = "--ignore-scripts";
+    };
+  };
 in
 stdenv.mkDerivation {
   pname = "ompweb";
@@ -19,21 +44,25 @@ stdenv.mkDerivation {
     hash = "sha256-eP/35LelvG0LitCQTtLQvaQEojoriFM7H/viilcl15M=";
   };
 
-  preferLocalBuild = true;
-  allowSubstitutes = false;
+  dontConfigure = true;
+  dontBuild = true;
 
   installPhase = ''
-    mkdir -p $out/lib/node_modules/ompweb $out/bin
-    tar -xzf $src -C $out/lib/node_modules/ompweb --strip-components=1
-    ln -s ${nodeModulesDir}/@kahme247/ompweb/node_modules $out/lib/node_modules/ompweb/node_modules
+    runHook preInstall
 
-    cat > $out/bin/ompweb << WRAPPER
+    mkdir -p "$out/lib/node_modules/@kahme247" "$out/bin"
+    cp -r . "$out/lib/node_modules/@kahme247/ompweb"
+    ln -s ${nodeModules}/node_modules "$out/lib/node_modules/@kahme247/ompweb/node_modules"
+
+    cat > "$out/bin/ompweb" << WRAPPER
     #!${bash}/bin/bash
     export PATH="${nodejs}/bin:\$PATH"
-    cd ${nodeModulesDir}/@kahme247/ompweb
-    exec ${nodejs}/bin/node node_modules/.bin/next start "\$@"
+    cd "$out/lib/node_modules/@kahme247/ompweb"
+    exec ${nodejs}/bin/node node_modules/next/dist/bin/next start "\$@"
     WRAPPER
-    chmod +x $out/bin/ompweb
+    chmod +x "$out/bin/ompweb"
+
+    runHook postInstall
   '';
 
   meta = with lib; {
