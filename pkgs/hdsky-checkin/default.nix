@@ -1,7 +1,5 @@
-# hdsky-checkin — HDSky（hdsky.me）自动签到
-#
-# 机制完全公开（站点三步签到 + ddddocr 验证码识别）；Cookie 等私密值只在调用方
-# 的 options 里填，且经 sops 加密。参见 modules/hdsky-checkin.nix。
+# hdsky-checkin — HDSky（hdsky.me）自动签到（站点三步签到 + ddddocr 验证码识别）。
+# Cookie 等私密值只在调用方 options 里填（经 sops 加密），本包不内置任何私密值。
 { python3, lib }:
 
 let

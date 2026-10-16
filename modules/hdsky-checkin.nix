@@ -1,8 +1,7 @@
 # hdsky-checkin — HDSky（hdsky.me）自动签到
 #
-# Mechanism is fully public; all private values (the login Cookie and the alert
-# recipient) live exclusively in the caller's private configuration and are
-# sops-encrypted there.
+# 机制完全公开；登录 Cookie、告警收件人等私有值由调用方在私有配置里
+# 经密钥管理加密提供，本模块只接受文件路径。
 { config, lib, pkgs, ... }:
 
 let
@@ -18,7 +17,7 @@ in
       description = "The hdsky-checkin package.";
     };
 
-    # ── Authentication ────────────────────────────────────────────────────────
+    # ── 认证 ────────────────────────────────────────────────────────────────
 
     cookieFile = lib.mkOption {
       type = lib.types.str;
@@ -27,12 +26,12 @@ in
 
     userAgent = lib.mkOption {
       type = lib.types.str;
-      # 取 cookie 的浏览器是 Safari，UA 保持一致，避免站点侧会话指纹不匹配。
+      # UA 须与取 Cookie 的浏览器一致，避免站点侧会话指纹不匹配。
       default = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15";
       description = "User-Agent sent with every request. Keep it consistent with the browser the Cookie was taken from.";
     };
 
-    # ── Failure alerting ──────────────────────────────────────────────────────
+    # ── 失败告警 ──────────────────────────────────────────────────────────────
 
     mailToFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
@@ -53,7 +52,7 @@ in
       description = "Path to the sendmail binary used for alert delivery.";
     };
 
-    # ── Schedule ──────────────────────────────────────────────────────────────
+    # ── 计划 ──────────────────────────────────────────────────────────────
 
     onCalendar = lib.mkOption {
       type = lib.types.str;
@@ -68,7 +67,7 @@ in
       description = "Random delay added to each run, so the hit is not at a perfectly predictable instant.";
     };
 
-    # ── Behaviour ─────────────────────────────────────────────────────────────
+    # ── 行为 ─────────────────────────────────────────────────────────────
 
     maxAttempts = lib.mkOption {
       type = lib.types.ints.positive;
@@ -91,7 +90,6 @@ in
         message = "services.hdskyCheckin.mailFrom must be set when mailToFile is used (postfix needs a sender for generic-map rewriting).";
       }
     ];
-
 
     users.users.hdsky-checkin = {
       isSystemUser = true;
@@ -124,7 +122,7 @@ in
           ++ [ "--sendmail" cfg.sendmail ]
         );
 
-        # Hardening（与 mesh-guardian 同一套）
+        # 安全加固（与 mesh-guardian 同一套）
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectHome = true;
@@ -132,14 +130,11 @@ in
         ProtectControlGroups = true;
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
-        # AF_UNIX 是 sendmail 必需；AF_NETLINK / AF_PACKET 是 postfix 的
-        # getifaddrs() 必需（缺了 `Address family not supported by protocol`）。
+        # AF_UNIX 供 sendmail 使用；AF_NETLINK / AF_PACKET 供 postfix 的
+        # getifaddrs() 使用。
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" "AF_PACKET" ];
-        # sendmail 是 setgid postdrop 的 wrapper，NoNewPrivileges 会让 setgid 失效；
-        # postdrop 还要往队列目录写信。缺任一条告警都发不出去：
-        #  - ProtectSystem=strict 让 /var/lib/postfix/queue 只读 →
-        #    `mail_queue_enter: ... Read-only file system`
-        #  - 没有 postdrop 组 → 写不进 `drwx-wx--- xjn postdrop` 的 maildrop/
+        # sendmail 是 setgid postdrop 的 wrapper，NoNewPrivileges 会让 setgid 失效，
+        # 且 postdrop 还要写队列目录：故放行队列目录 + 加入 postdrop 组，缺一告警发不出。
         ReadWritePaths = [ "/var/lib/postfix/queue" ];
         SupplementaryGroups = [ "postdrop" ];
         RestrictRealtime = true;

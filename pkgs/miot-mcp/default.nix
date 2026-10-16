@@ -3,7 +3,7 @@
 let
   py = python312.pkgs;
 
-  # The installed server uses MCP 1.30.0; nixpkgs 26.05 has 1.26.0.
+  # miot-mcp 要求的 MCP 版本高于 nixpkgs 自带，按上游 wheel 自打包。
   mcp = py.buildPythonPackage {
     pname = "mcp";
     version = "1.30.0";
@@ -31,8 +31,7 @@ let
     pythonImportsCheck = [ "mcp" ];
   };
 
-  # mijiaAPI 4.2.1 requires FastMCP >= 3.4.2. The 26.05 version is 3.2.3;
-  # FastMCP 3.x ships its implementation separately as fastmcp-slim.
+  # mijiaAPI 要求的 FastMCP 高于 nixpkgs 自带；FastMCP 3.x 实现拆在 fastmcp-slim wheel，两者都按上游 wheel 自打包。
   pyKeyValueAio = py.buildPythonPackage {
     pname = "py-key-value-aio";
     version = "0.4.4";
@@ -44,7 +43,7 @@ let
     propagatedBuildInputs = [
       py.beartype
       py.typing-extensions
-      # FastMCP requests the filetree, keyring and memory extras.
+      # fastmcp 声明的 filetree / keyring / memory 依赖。
       py.aiofile
       py.anyio
       py.keyring
@@ -69,7 +68,7 @@ let
       py.python-dotenv
       py.rich
       py.typing-extensions
-      # fastmcp-slim[client,server], required by the fastmcp wheel.
+      # fastmcp-slim[client,server] 依赖，fastmcp wheel 需要。
       py.authlib
       py.cyclopts
       py.exceptiongroup
@@ -127,10 +126,9 @@ let
     ];
     doCheck = false;
     pythonImportsCheck = [ "mijiaAPI" ];
-    # The upstream QR login URL uses print(), which corrupts stdio JSON-RPC.
-    # Wheel contents are available only after installation, not in postPatch.
+    # 上游 QR 登录链接用 print() 输出，会污染 stdio JSON-RPC，改为 logger.info；wheel 内容只能装完后再替换。
     postInstall = ''
-      substituteInPlace "$out/lib/python3.12/site-packages/mijiaAPI/apis.py" \
+      substituteInPlace "$out/${py.python.sitePackages}/mijiaAPI/apis.py" \
         --replace-fail '        print(f"也可以访问链接查看二维码图片:' '        logger.info(f"也可以访问链接查看二维码图片:'
     '';
   };
@@ -140,15 +138,14 @@ py.buildPythonApplication {
   version = "2.0.0";
   pyproject = true;
 
-  # Matches the installed checkout; authentication, logs and QR artifacts live
-  # under HOME/.miot-mcp at runtime, never in the fetched source or Nix store.
+  # 与现网部署同源；登录凭据、日志、二维码产物运行时放 HOME/.miot-mcp，不进源码与 store。
   src = fetchFromGitHub {
     owner = "jx8819";
     repo = "miot-mcp";
     rev = "ea7aee35aa99092f9e56be667ace1226872f5728";
     hash = "sha256-umH+MIL/7VVVDw9HPe+R2AQozG8dj5d2f3VkZpZSYDE=";
   };
-  # Keep QR ASCII fallback visible on stderr without mixing it into MCP stdout.
+  # QR ASCII 兜底走 stderr，不混进 MCP stdout。
   postPatch = ''
     substituteInPlace adapter/mijia_adapter.py \
       --replace-fail 'qr.print_ascii(invert=True, tty=True)' 'qr.print_ascii(out=sys.stderr, invert=True, tty=True)' \
@@ -158,7 +155,7 @@ py.buildPythonApplication {
   build-system = [ py.setuptools py.wheel ];
   dependencies = [ mcp mijiaAPI py.pillow py.qrcode ];
 
-  # Upstream tests and login require a live Mijia account.
+  # 上游测试与登录都要真实米家账号，无法在构建期跑。
   doCheck = false;
 
   meta = {

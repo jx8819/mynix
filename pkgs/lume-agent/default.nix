@@ -1,7 +1,5 @@
-# lume-agent — Lume VPS 探针监控客户端 (vpsmon-agent)
-#
-# 上游：MostlyCodex/lume-monitor (agent/)
-# 纯 Go 编写，单二进制，出站 HTTPS 上报，走 Linux 非特权 datagram ping socket
+# lume-agent — Lume VPS 探针监控客户端（上游 MostlyCodex/lume-monitor，agent/）。
+# 纯 Go 单二进制，出站 HTTPS 上报，走 Linux 非特权 datagram ping socket。
 { lib
 , buildGoModule
 , fetchFromGitHub
@@ -27,7 +25,8 @@ buildGoModule rec {
   ];
 
   postInstall = ''
-    mv $out/bin/vpsmon-agent $out/bin/lume-agent || true
+    # 上游构建出的二进制名是 vpsmon-agent，统一改名 lume-agent。
+    mv $out/bin/vpsmon-agent $out/bin/lume-agent
   '';
 
   meta = {

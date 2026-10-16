@@ -2,7 +2,7 @@
 
  stdenv.mkDerivation rec {
    pname = "perftest";
-   # 2026-09-21 从 24.01.0-0.38 升到上游最新 release（linux-rdma/perftest）。
+   # InfiniBand/RDMA verbs 性能测试工具（linux-rdma/perftest 源码打包）。
    version = "26.04.17";
 
    src = fetchFromGitHub {
@@ -15,7 +15,8 @@
    nativeBuildInputs = [ autoconf automake rdma-core gnum4 libtool pciutils ];
    buildInputs = [ rdma-core ];
 
-   postUnpack =  ''
+   # 构建脚本 shebang 修正到 store 解释器。
+   preConfigure = ''
      patchShebangs .
    '';
 

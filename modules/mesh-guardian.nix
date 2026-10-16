@@ -1,7 +1,6 @@
-# mesh-guardian — Xiaomi Mesh wired-backhaul recovery guardian
+# mesh-guardian — 小米 Mesh 有线回程自愈守护进程
 #
-# Mechanism is fully public; all private values (AP IPs, passwords, email
-# addresses) live exclusively in the caller's private configuration via options.
+# 机制完全公开；AP IP、密码、邮箱等私有值由调用方经 options 指定。
 { config, lib, pkgs, ... }:
 
 let
@@ -19,7 +18,7 @@ in
       description = "The mesh-guardian package.";
     };
 
-    # ── AP addresses ─────────────────────────────────────────────────────────
+    # ── AP 地址 ─────────────────────────────────────────────────────────
 
     controllerIp = lib.mkOption {
       type = lib.types.str;
@@ -44,14 +43,14 @@ in
       description = "List of satellite APs to monitor and recover.";
     };
 
-    # ── Authentication ────────────────────────────────────────────────────────
+    # ── 认证 ────────────────────────────────────────────────────────────────
 
     passwordFile = lib.mkOption {
       type = lib.types.str;
       description = "Path to the private AP admin password file, supplied by the deployment.";
     };
 
-    # ── Timing ────────────────────────────────────────────────────────────────
+    # ── 时间参数 ────────────────────────────────────────────────────────────
 
     checkInterval = lib.mkOption {
       type = lib.types.ints.positive;
@@ -83,8 +82,7 @@ in
       description = ''
         Consecutive failed ping probes required before an AP is declared
         unreachable. Debounce: a single dropped probe (cold ARP right after the
-        service starts, transient loss) is ignored instead of logging a scary
-        "went unreachable ... came back after 64s" pair that reads like a real
+        service starts, transient loss) is ignored instead of logging a false
         outage. With the default checkInterval of 60s, 2 means roughly one
         missed cycle — still short enough to catch a genuine AP reboot.
       '';
@@ -95,15 +93,15 @@ in
       default = 600;
       description = ''
         Seconds an AP may be completely unreachable before the guardian considers
-        it a long-term absence (power cut, maintenance, switch restart after
-        cleaning). No reboot is issued during this window, and the grace timer
+        it a long-term absence (power cut, maintenance, switch restart).
+        No reboot is issued during this window, and the grace timer
         resets to zero once the AP comes back. If the AP is still unreachable
         after this window it is left alone — no reboot is ever sent to an
         unreachable device.
       '';
     };
 
-    # ── Failure cap & alerting ────────────────────────────────────────────────
+    # ── 失败上限与告警 ────────────────────────────────────────────────────
 
     maxFailures = lib.mkOption {
       type = lib.types.ints.positive;
@@ -136,7 +134,7 @@ in
       description = "Path to the sendmail binary used for alert delivery.";
     };
 
-    # ── Advanced ─────────────────────────────────────────────────────────────
+    # ── 进阶 ─────────────────────────────────────────────────────────────
 
     apiTimeout = lib.mkOption {
       type = lib.types.ints.positive;
@@ -153,7 +151,7 @@ in
     stateFile = lib.mkOption {
       type = lib.types.str;
       default = "/var/lib/mesh-guardian/state.json";
-      description = "Path to the JSON state persistence file. Survives service restarts; deleted by systemd on a clean start only if you use StateDirectory.";
+      description = "Path to the JSON state persistence file. Survives service restarts; LATCH is deliberately not restored, so restarting the service resumes monitoring.";
     };
 
     debug = lib.mkOption {
@@ -172,7 +170,6 @@ in
       }
     ];
 
-
     users.users.mesh-guardian = {
       isSystemUser = true;
       group = "mesh-guardian";
@@ -186,7 +183,7 @@ in
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
 
-      # ping lives in iputils; without it is_reachable() always fails.
+      # ping 在 iputils 里；缺了 is_reachable() 恒失败。
       path = [ pkgs.iputils ];
 
       serviceConfig = {
@@ -219,12 +216,11 @@ in
         Restart = "on-failure";
         RestartSec = "30s";
 
-        # State directory (survives restarts; cleared by manual --unlatch or
-        # service restart which reloads persisted latch from the JSON file)
+        # 状态目录：状态 JSON 跨重启保留；LATCH 不从状态恢复，重启服务即重新开始。
         StateDirectory = "mesh-guardian";
         StateDirectoryMode = "0700";
 
-        # Hardening
+        # 安全加固
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectHome = true;
@@ -232,23 +228,16 @@ in
         ProtectControlGroups = true;
         ProtectKernelModules = true;
         ProtectKernelTunables = true;
-        # AF_NETLINK / AF_PACKET 是 postfix sendmail 的 getifaddrs() 必需的
-        # （缺了会 `fatal: inet_addr_local[getifaddrs]: Address family not
-        # supported by protocol`，exit 75，告警静默丢失）。
+        # AF_NETLINK / AF_PACKET 供 postfix sendmail 的 getifaddrs() 使用。
         RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" "AF_PACKET" ];
-        # sendmail 是 setgid postdrop 的 wrapper，而 NoNewPrivileges 会让 setgid
-        # 失效；postdrop 还要往队列目录写信。两者缺一，告警照样发不出去：
-        #  - ProtectSystem=strict 让 /var/lib/postfix/queue 只读 →
-        #    `mail_queue_enter: ... Read-only file system`
-        #  - 没有 postdrop 组 → 写不进 `drwx-wx--- xjn postdrop` 的 maildrop/
-        # 所以显式放行队列目录 + 把服务用户加进 postdrop 组。
+        # sendmail 是 setgid postdrop 的 wrapper，NoNewPrivileges 会让 setgid 失效，
+        # 且 postdrop 还要写队列目录：故放行队列目录 + 加入 postdrop 组，缺一告警发不出。
         ReadWritePaths = [ (builtins.dirOf cfg.stateFile) "/var/lib/postfix/queue" ];
         SupplementaryGroups = [ "postdrop" ];
         RestrictRealtime = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
 
-        # Allow sendmail to be called (it's a setuid wrapper)
         AmbientCapabilities = [];
 
         StandardOutput = "journal";

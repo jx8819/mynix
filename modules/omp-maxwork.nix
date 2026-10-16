@@ -10,6 +10,7 @@ let
     modelRoles = cfg.modelRoles;
     thinkingLevel = cfg.thinkingLevel;
     modelProbeUrl = cfg.modelProbeUrl;
+    modelProbeProvider = cfg.modelProbeProvider;
     defaultMode = cfg.defaultMode;
     codex = {
       home = cfg.codex.home;
@@ -26,8 +27,8 @@ in
 
     agentDir = lib.mkOption {
       type = lib.types.str;
-      example = "/mnt/Media/Settings/agent/omp";
-      description = "omp 的 agent 目录（PI_CODING_AGENT_DIR）。扩展与命令文件安装到其 extensions/ 与 commands/ 下。";
+      example = "/var/lib/omp-agent";
+      description = "omp 的 agent 目录（PI_CODING_AGENT_DIR）。扩展装到其 extensions/ 下，配置写到其根目录 maxwork.config.json。";
     };
 
     owner = lib.mkOption {
@@ -45,7 +46,7 @@ in
     command = lib.mkOption {
       type = lib.types.str;
       default = "maxwork";
-      description = "斜杠命令名（/<command> 执行任务；/<command>-setup、/<command>-status 为管理命令）";
+      description = "斜杠命令名（/<command> 为唯一入口，on|off|setup|status 为其子命令）";
     };
 
     modelRoles = lib.mkOption {
@@ -63,19 +64,24 @@ in
     modelProbeUrl = lib.mkOption {
       type = lib.types.str;
       default = "";
-      description = "advisor 健康预检的模型 API 探测端点（完整 URL 含协议头；留空跳过网络探测）。真实端点属私有配置，写在使用方的私有仓。";
+      description = "advisor 健康预检的模型 API 探测端点（完整 URL 含协议头；留空跳过网络探测）。真实端点属环境值，写在使用方的私有配置。";
+    };
+    modelProbeProvider = lib.mkOption {
+      type = lib.types.str;
+      default = "xiaomi-token-plan-cn";
+      description = "advisor 预检从 models.yml 读取 apiKey 的 provider 块名（与 modelProbeUrl 配套；留空跳过探测）。";
     };
     defaultMode = lib.mkOption {
       type = lib.types.enum [ "omp" "codex" ];
       default = "codex";
-      description = "默认模式：omp=仅 omp 内 API；codex=omp + codex CLI 联动（可被 /<command>-setup 覆盖，状态存 maxwork-state.json）";
+      description = "默认模式：omp=仅 omp 内 API；codex=omp + codex CLI 联动（可被 /<command> setup 覆盖，状态存 maxwork-state.json）";
     };
 
     codex = {
       home = lib.mkOption {
         type = lib.types.str;
         default = "";
-        example = "/mnt/Media/Settings/agent/codex";
+        example = "/var/lib/codex";
         description = "codex CLI 的 CODEX_HOME（codex 模式的可用性预检与委派使用；留空则预检总是失败并回退 omp）";
       };
       outDir = lib.mkOption {

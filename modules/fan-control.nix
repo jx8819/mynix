@@ -1,12 +1,10 @@
 # Supermicro IPMI 风扇调速模块（options 化）
 #
-# raw 命令格式（依据 STH: Supermicro X9/X10/X11 Fan Speed Control）：
+# raw 命令格式（依据 STH 的 Supermicro 风扇控制文档）：
 #   ipmitool raw 0x30 0x70 0x66 0x01 0x<zone> 0x<duty>
 #     zone 0x00 = CPU zone（FAN1/FAN2...），0x01 = Peripheral zone（FANA/FANB...）
 #     duty 0x00-0x64 = 0-100%，所以百分号直接 printf '%02x'（不是 0x00-0xFF）
-# 实测 X10 系（nix-media）与 H12SSL-i（nix-nas）都认这套命令。
 #
-# 需要每台机器在 imports 里加上本文件，然后用 services.fanControl.* 调。
 # 脚本打包在 pkgs/fan-control/，本文件只管 options + systemd 单元声明。
 #
 { config, lib, pkgs, ... }:
@@ -42,7 +40,6 @@ in
       default = [];
       description = ''
         要跟踪的 zpool 名称列表。留空 = 自动发现本机全部池。
-        nix-nas 只跟踪 Home 池（SSD 池是单块 NVMe，温度量级跟机械盘不一样）。
       '';
     };
 
@@ -165,7 +162,6 @@ in
     };
 
     # ── 周期性调速：CPU zone 与 Peripheral zone 各自独立调档 ──
-    # 脚本打包在 pkgs/fan-control/，本处只声明 systemd 单元。
     systemd.services.fan-control = {
       description = "IPMI dual-zone fan duty cycle control (zpool HDD average + CPU)";
       # fan-mode-init 只在 setFullMode 时存在（上面 mkIf），after/requires 同步条件化，
@@ -174,10 +170,8 @@ in
       requires = lib.optional cfg.setFullMode "fan-mode-init.service";
       serviceConfig = {
         Type = "oneshot";
-        # 状态文件放 RuntimeDirectory（/run/fan-control，root 0700、开机清空）：
-        # 不能再放 /tmp —— 那里全局可写且 nspawn 容器与宿主共享，任意本地进程
-        # 预写文件就会被本服务（root）source，等于本地提权。/run 与 /tmp 同为
-        # tmpfs 开机清空，不影响「开机 applied 初值=100」的假设。
+        # 状态文件放 RuntimeDirectory（/run/fan-control，root 0700、开机清空），
+        # 不用全局可写的 /tmp：防止本地进程预写文件被本服务（root）source 提权。
         RuntimeDirectory = "fan-control";
         RuntimeDirectoryMode = "0700";
         Environment = "PATH=${PATH'}";

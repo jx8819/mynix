@@ -1,8 +1,6 @@
-# omp — terminal-based coding agent (can1357/oh-my-pi), built from source.
-#
-# 配方沿用 nixpkgs pkgs/by-name/om/omp/package.nix（bun 打 JS bundle +
-# cargo 构建 pi-natives N-API addon），源码 pin 到指定 rev，替代更新滞后的
-# nixpkgs unstable omp。数据/凭据运行时在 $PI_CODING_AGENT_DIR / $HOME，不进 store。
+# omp — 终端编码代理（can1357/oh-my-pi 源码打包）。
+# 配方对齐 nixpkgs 的 omp：bun 打 JS bundle、cargo 构建 pi-natives N-API addon，源码钉固定 rev。
+# 数据/凭据运行时在 $PI_CODING_AGENT_DIR / $HOME，不进 store。
 {
   lib,
   stdenv,
@@ -43,7 +41,7 @@ stdenv.mkDerivation (finalAttrs: {
   src = fetchFromGitHub {
     owner = "can1357";
     repo = "oh-my-pi";
-    # 统一 pin：与 myconfig 现网 omp 对齐
+    # 与现网部署的 omp 保持同源 pin。
     rev = "d0b56045fff4367a23d839bf8250d49c05486566";
     hash = "sha256-YNPG9fDkEa+wKLip2q0mV9enBJAQUEeZH/M7UVGCqQ4=";
   };
@@ -58,7 +56,7 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail 'if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0)' 'if (false)'
   '';
 
-  # required until https://github.com/NixOS/nixpkgs/issues/255890 & https://github.com/NixOS/nixpkgs/issues/335534 are fixed
+  # node_modules 单独做固定输出：绕开 nixpkgs 里 bun 构建依赖的已知缺陷。
   node_modules = stdenv.mkDerivation {
     pname = "${finalAttrs.pname}-node_modules";
     inherit (finalAttrs) version src;
@@ -92,7 +90,7 @@ stdenv.mkDerivation (finalAttrs: {
       runHook postInstall
     '';
 
-    # Prevents breaking symlinks in node_modules
+    # 不做 fixup，避免弄断 node_modules 里的符号链接。
     dontFixup = true;
 
     outputHash = "sha256-sgmnI13GsXa4RclWfFz/1Kpw2CqHbs+SidbYoEyxB/E=";
@@ -124,9 +122,8 @@ stdenv.mkDerivation (finalAttrs: {
 
   env = {
     RUSTC_BOOTSTRAP = "1";
-    # rustc 1.95（nixpkgs 26.05）里 result_option_map_or_default 尚未稳定，
-    # 上游源码已直接使用（其构建工具链更新）。用 crate-attr 给全部 crate 统一
-    # 开闸，避免逐 crate 改源码；RUSTC_BOOTSTRAP 允许 stable 编译器启用 gate。
+    # 上游源码用到尚未稳定的 feature（result_option_map_or_default 等），本工具链是 stable：
+    # 用 crate-attr 给全部 crate 统一开闸（免逐 crate 改源码），RUSTC_BOOTSTRAP 让 stable 编译器启用 gate。
     RUSTFLAGS = "-Zcrate-attr=feature(result_option_map_or_default,isolate_most_least_significant_one)";
   };
 
@@ -168,7 +165,7 @@ stdenv.mkDerivation (finalAttrs: {
     cp -R packages python node_modules $out/lib/omp/
     chmod -R u+w $out/lib/omp
 
-    # Prune foreign binaries to eliminate dead code and prevent autoPatchelf issues
+    # 剪掉异平台二进制（死代码），避免 autoPatchelf 误处理。
     find $out/lib/omp/node_modules -type d \( ${
       lib.concatStringsSep " -o " (
         lib.map (n: "-name '*${n}*'") (

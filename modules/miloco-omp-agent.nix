@@ -5,7 +5,7 @@
 # 能力边界（这是本模块存在的理由）：
 #   * OMP 子进程以 --no-tools --no-extensions --no-skills --no-rules --no-lsp 启动，
 #     没有 shell / 文件 / 网络 / 代码工具；
-#   * 它唯一的工具是本服务注册的 miot_* 宮主工具，全部代理到 Miloco 的米家 API；
+#   * 它唯一的工具是本服务注册的 miot_* 宿主工具，全部代理到 Miloco 的米家 API；
 #   * tools.devicePolicy 在本进程内强制执行，命中 denyDids 的设备在发 HTTP 前就被拒绝。
 #
 # 机制完全公开；bearer / token / API Key 等私密值全部由调用方 options 指到文件路径。
@@ -113,7 +113,7 @@ in
 
     authBearerFile = lib.mkOption {
       type = lib.types.str;
-      example = "/mnt/Media/Settings/agent/omp/miloco-omp/secrets/webhook_bearer";
+      example = "/run/secrets/miloco-webhook-bearer";
       description = "webhook bearer 令牌文件；须与 Miloco 的 agent.auth_bearer 一致。";
     };
 
@@ -125,14 +125,14 @@ in
       };
       tokenFile = lib.mkOption {
         type = lib.types.str;
-        example = "/mnt/Media/Settings/agent/omp/miloco-omp/secrets/miloco_token";
+        example = "/run/secrets/miloco-token";
         description = "Miloco server token 文件（Authorization: Bearer …）。";
       };
     };
 
     apiKeyFile = lib.mkOption {
       type = lib.types.str;
-      example = "/mnt/Media/Settings/agent/omp/miloco-omp/secrets/mimo_api_key";
+      example = "/run/secrets/model-api-key";
       description = "OMP 模型供应商 API Key 文件内容，注入到 apiKeyEnvVar 指定的环境变量。";
     };
 

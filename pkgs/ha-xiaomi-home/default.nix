@@ -1,8 +1,5 @@
-# ha-xiaomi-home — Xiaomi 官方 Home Assistant 集成（domain: xiaomi_home）
-#
-# 上游：https://github.com/XiaoMi/ha_xiaomi_home
-# 固定版本以避免 nixpkgs 更新延迟；manifest 的 Python 依赖全部取自
-# Home Assistant 自己的 Python package set，保证解释器和依赖版本一致。
+# ha-xiaomi-home — 小米官方 HA 集成（domain: xiaomi_home）。
+# 固定版本打包（不跟 nixpkgs）；Python 依赖全取自 HA 自己的包集，保证解释器与依赖一致。
 { lib
 , home-assistant
 , fetchFromGitHub

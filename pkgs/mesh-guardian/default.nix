@@ -7,7 +7,7 @@ python3.pkgs.buildPythonApplication {
 
   src = ./.;
 
-  # Pure Python stdlib only — no extra deps.
+  # 纯标准库实现，无第三方依赖。
   propagatedBuildInputs = [ ];
 
   installPhase = ''

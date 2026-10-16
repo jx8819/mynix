@@ -1,7 +1,5 @@
-# ompweb — Web UI for the OMP coding agent
-# ompweb upstream project (link removed: https links are private per policy 2026-09-23)
-#
-# NixOS module：机制全部公开；主机相关的值都是 options（在调用方的私有配置里赋值）。
+# ompweb — OMP 编码代理的 Web UI（NixOS 模块）。
+# 机制全部公开；主机相关的值都是 options，由调用方在私有配置里赋值。
 { config, lib, pkgs, ... }:
 
 let
@@ -41,7 +39,7 @@ in
     extraReadWritePaths = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
-      description = "主机特定的额外可写路径（实例参数，放 services/*/ 开关文件，勿写进本模块）";
+      description = "主机特定的额外可写路径（实例参数，由调用方配置，勿写进本模块）";
     };
 
     openFirewall = lib.mkOption {
@@ -86,9 +84,9 @@ in
         RestartSec = 5;
         EnvironmentFile = cfg.environmentFile;
         ExecStart = "${pkgs.ompweb}/bin/ompweb --hostname ${cfg.hostname} --port ${toString cfg.port}";
-        # Create only missing SQLite files; never rewrite existing OMP state or
-        # follow the config.yml symlink installed by SOPS when setting ownership.
-        # Root pre-start bypasses the tmpfiles unsafe-path check on media mounts.
+        # 只补建缺失的 SQLite 文件：不改写既有 OMP 状态，改属主不跟随
+        # 密钥管理装配的 config.yml 软链。root 前置脚本用于绕过 tmpfiles
+        # 对外部数据挂载盘的 unsafe-path 检查。
         ExecStartPre = "+${pkgs.writeShellScript "ompweb-initialize-state" ''
           set -eu
           agent_dir=${lib.escapeShellArg (toString cfg.agentDir)}
@@ -119,7 +117,6 @@ in
         SupplementaryGroups = [ "keys" ];
       };
     };
-
 
     networking.firewall.allowedTCPPorts = lib.mkIf cfg.openFirewall [ cfg.port ];
   };

@@ -1,5 +1,5 @@
-# Home Assistant custom components — declarative selection via options.
-# 调用方（myconfig）只填 options，包和接线由本模块处理。
+# Home Assistant 自定义集成 —— 经 options 声明式选择。
+# 调用方只填 options，包和接线由本模块处理。
 # 隐私/凭据请用 sops，不要写进本模块。
 { config, lib, pkgs, ... }:
 
@@ -58,8 +58,7 @@ in
       extraComponents =
         lib.optionals cfg.xiaomiHome [ "ffmpeg" "zeroconf" ]
         ++ lib.optionals cfg.homeconnectLocal [ "zeroconf" "file_upload" ]
-        ++ lib.optionals cfg.dyson [ "bluetooth" ]
-        ++ lib.optionals cfg.cololight [ ];
+        ++ lib.optionals cfg.dyson [ "bluetooth" ];
     };
   };
 }

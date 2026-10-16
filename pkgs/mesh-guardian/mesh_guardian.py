@@ -1,33 +1,30 @@
 #!/usr/bin/env python3
-"""mesh-guardian — Xiaomi Mesh wired-backhaul recovery daemon.
+"""mesh-guardian — 小米 Mesh 有线回程自愈守护进程。
 
-Machine-specific values (AP IPs, passwords, email) come exclusively from
-command-line flags so this program stays free of private deployment data.
+机器相关值（AP IP、密码、邮箱）全部来自命令行参数，程序内不含部署私有数据。
 
-State-machine per satellite AP:
-  OK            → wired link_type from controller topology
-  WIRELESS      → link_type != "wired" for at least --check-interval seconds
-  REBOOTING     → reboot command sent; waiting up to --reboot-wait seconds
-  COOLDOWN      → post-reboot grace period (switch restart / power cycle)
-  LATCH         → failure count hit --max-failures; human intervention required
+每个卫星 AP 的状态机：
+  OK        → 控制器拓扑中 link_type 为 wired
+  WIRELESS  → 观测到 link_type != "wired"（持续超过 --wireless-dwell 秒才触发重启）
+  REBOOTING → 重启命令已发，等待不超过 --reboot-wait 秒恢复有线
+  COOLDOWN  → 恢复后的冷静期（等交换机/电源稳定）
+  LATCH     → 连续失败达到 --max-failures，停止自动处置、等待人工介入
 
-Suppression rules (no reboot issued when any holds):
-  - AP unreachable (ping fails) — power cut or maintenance
-  - AP offline for < --offline-grace seconds — transient / switch restart
-  - AP already REBOOTING or in COOLDOWN
-  - Daemon-wide LATCH active
+抑制规则（命中任一即不下发重启）：
+  - AP 不可达（ping 失败）——断电或维护中
+  - AP 离线不足 --offline-grace 秒——瞬断/交换机重启
+  - AP 已在 REBOOTING 或 COOLDOWN
+  - 守护进程级 LATCH 已激活
 
-Notification: sendmail (via postfix relay already configured on the host) with
-  From: set to the configured sender so postfix generic map rewrites correctly.
+通知：经本机 sendmail（postfix relay）发信，From 用配置的发件人，
+  以便 postfix generic map 正确重写。
 """
 
 import argparse
 import hashlib
 import json
 import logging
-import os
 import signal
-import smtplib
 import socket
 import subprocess
 import sys
@@ -43,7 +40,7 @@ from typing import Optional
 
 
 # ──────────────────────────────────────────────
-# Auth helpers  (mirrors the JS Encrypt object)
+# 登录鉴权（对齐小米 JS 端的 Encrypt 逻辑）
 # ──────────────────────────────────────────────
 
 def _sha1(s: str) -> str:
@@ -61,7 +58,7 @@ def _make_nonce() -> str:
     import random
     ts = int(time.time())
     rnd = random.randint(0, 9999)
-    # device_id is baked into the JS; use the same placeholder
+    # device_id 固定在小米 JS 里，这里沿用同样的占位值
     device_id = "0a:06:97:54:e5:d3"
     return f"0_{device_id}_{ts}_{rnd}"
 
@@ -75,7 +72,7 @@ def _hash_password(password: str, nonce: str, use_sha256: bool) -> str:
 
 
 # ──────────────────────────────────────────────
-# HTTP helpers (no third-party deps)
+# HTTP 辅助（不依赖第三方库）
 # ──────────────────────────────────────────────
 
 class APIError(Exception):
@@ -104,11 +101,11 @@ def _get_json(url: str, timeout: int = 10) -> dict:
 
 
 # ──────────────────────────────────────────────
-# Xiaomi API
+# 小米 API
 # ──────────────────────────────────────────────
 
 class XiaomiClient:
-    """Session towards one Xiaomi router."""
+    """与单台小米路由器的会话。"""
 
     def __init__(self, ip: str, password: str, timeout: int = 10):
         self.ip = ip
@@ -120,7 +117,7 @@ class XiaomiClient:
         return f"http://{self.ip}"
 
     def _login(self) -> str:
-        # Check which hash mode the firmware uses
+        # 先看固件用哪种哈希模式
         info = _get_json(
             f"{self._base()}/cgi-bin/luci/api/xqsystem/init_info",
             timeout=self.timeout,
@@ -147,16 +144,16 @@ class XiaomiClient:
         return f"{self._base()}/cgi-bin/luci/;stok={tok}{path}"
 
     def topology(self) -> dict:
-        """Fetch /api/misystem/topo_graph from the controller AP."""
+        """从控制器 AP 拉取 /api/misystem/topo_graph。"""
         try:
             return _get_json(self._api("/api/misystem/topo_graph"), timeout=self.timeout)
         except APIError:
-            # Token may have expired; retry once
+            # token 可能过期，清掉重试一次
             self._token = None
             return _get_json(self._api("/api/misystem/topo_graph"), timeout=self.timeout)
 
     def reboot(self) -> None:
-        """Send reboot to this AP (not the controller)."""
+        """向该 AP（非控制器）下发重启。"""
         try:
             url = self._api("/api/xqsystem/reboot") + "?client=web"
             _get_json(url, timeout=self.timeout)
@@ -167,15 +164,15 @@ class XiaomiClient:
 
 
 # ──────────────────────────────────────────────
-# Per-AP state machine
+# 单 AP 状态机
 # ──────────────────────────────────────────────
 
 class APState(Enum):
     OK        = auto()
-    WIRELESS  = auto()   # currently on wireless backhaul
-    REBOOTING = auto()   # reboot sent, waiting for recovery
-    COOLDOWN  = auto()   # post-reboot grace, not yet stable
-    LATCH     = auto()   # too many failures; stop touching
+    WIRELESS  = auto()   # 当前走无线回程
+    REBOOTING = auto()   # 重启已发，等待恢复
+    COOLDOWN  = auto()   # 重启后冷静期，尚未稳定
+    LATCH     = auto()   # 失败过多，停止自动处置
 
 
 @dataclass
@@ -186,9 +183,9 @@ class APRecord:
     state_since: float = field(default_factory=time.monotonic)
     consecutive_failures: int = 0
     last_reboot_at: float = 0.0
-    # monotonic timestamp when AP was first seen offline/unreachable
+    # AP 首次判定离线/不可达的 monotonic 时间戳
     offline_since: Optional[float] = None
-    # consecutive failed ping probes; used for the unreachable debounce
+    # 连续 ping 失败次数，供不可达防抖使用
     ping_failures: int = 0
 
     def transition(self, new_state: APState) -> None:
@@ -199,7 +196,7 @@ class APRecord:
 
 
 # ──────────────────────────────────────────────
-# Notification
+# 通知
 # ──────────────────────────────────────────────
 
 def send_mail(
@@ -209,12 +206,7 @@ def send_mail(
     body: str,
     sendmail_bin: str = "/run/wrappers/bin/sendmail",
 ) -> bool:
-    """Return True only when sendmail actually accepted the message.
-
-    A watchdog that lies about having alerted is worse than one that admits it
-    failed — 2026-09-26 the LATCH alert was silently lost to a sendmail sandbox
-    failure while the log claimed "Sent alert to ...".
-    """
+    """仅当 sendmail 真正接受消息才返回 True；告警宁可承认失败，不可谎报成功。"""
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
@@ -241,7 +233,7 @@ def send_mail(
 
 
 # ──────────────────────────────────────────────
-# Ping helper
+# ping 探测
 # ──────────────────────────────────────────────
 
 def is_reachable(ip: str, timeout: int = 2) -> bool:
@@ -257,7 +249,7 @@ def is_reachable(ip: str, timeout: int = 2) -> bool:
 
 
 # ──────────────────────────────────────────────
-# State persistence (simple JSON file)
+# 状态持久化（简单 JSON 文件）
 # ──────────────────────────────────────────────
 
 def _load_state(path: Path) -> dict:
@@ -287,9 +279,7 @@ def _save_state(path: Path, records: dict[str, APRecord], latch: bool) -> None:
 
 
 def _restore_state(path: Path, records: dict[str, APRecord]) -> None:
-    """Restore per-AP counters from disk.
-    LATCH is never restored — a service restart is the human's signal
-    to try again from a clean slate."""
+    """从磁盘恢复各 AP 计数。LATCH 从不恢复：重启服务即视为人工复位、从头再来。"""
     saved = _load_state(path)
     for ip, s in saved.get("aps", {}).items():
         if ip not in records:
@@ -299,7 +289,6 @@ def _restore_state(path: Path, records: dict[str, APRecord]) -> None:
             rec.state = APState[s["state"]]
         except KeyError:
             rec.state = APState.OK
-        # Never carry LATCH across restarts.
         if rec.state == APState.LATCH:
             rec.state = APState.OK
         rec.state_since = s.get("state_since", time.monotonic())
@@ -309,7 +298,7 @@ def _restore_state(path: Path, records: dict[str, APRecord]) -> None:
 
 
 # ──────────────────────────────────────────────
-# Core daemon loop
+# 主循环
 # ──────────────────────────────────────────────
 
 def run(args: argparse.Namespace) -> None:
@@ -320,13 +309,13 @@ def run(args: argparse.Namespace) -> None:
         stream=sys.stdout,
     )
 
-    # Password file (written by sops at runtime)
+    # 密码文件（运行期由部署方渲染，不含在程序里）
     password = Path(args.password_file).read_text().strip()
 
-    # Controller client (always .100)
+    # 控制器 AP 客户端（IP 由 --controller-ip 指定）
     controller = XiaomiClient(args.controller_ip, password, timeout=args.api_timeout)
 
-    # One record + client per satellite
+    # 每个卫星 AP 一条记录 + 一个客户端
     satellites: list[tuple[str, str, XiaomiClient]] = []
     for spec in args.satellite:
         parts = spec.split("=", 1)
@@ -345,7 +334,7 @@ def run(args: argparse.Namespace) -> None:
     _restore_state(state_path, records)
     daemon_latch = False
 
-    # Signal handler: graceful shutdown
+    # 信号处理：优雅退出
     stop = False
     def _sig(*_):
         nonlocal stop
@@ -362,7 +351,7 @@ def run(args: argparse.Namespace) -> None:
     while not stop:
         now_mono = time.monotonic()
 
-        # ── Fetch topology ──────────────────────────────────────
+        # ── 拉取拓扑 ──────────────────────────────────────
         topo_ok = False
         wired_ips: set[str] = set()
         try:
@@ -381,7 +370,7 @@ def run(args: argparse.Namespace) -> None:
             _sleep(args.check_interval, lambda: stop)
             continue
 
-        # ── Per-AP state machine ────────────────────────────────
+        # ── 逐 AP 状态机 ────────────────────────────────
         for ip, rec in records.items():
             _tick_ap(
                 rec=rec,
@@ -390,13 +379,10 @@ def run(args: argparse.Namespace) -> None:
                 wired_ips=wired_ips,
                 now_mono=now_mono,
                 args=args,
-                password=password,
-                daemon_latch_ref=[daemon_latch],
+                daemon_latch=daemon_latch,
             )
-            if daemon_latch_ref := [daemon_latch]:
-                daemon_latch = daemon_latch_ref[0]
 
-        # ── Check if any AP just pushed us into LATCH ───────────
+        # ── 检查是否有 AP 刚进入 LATCH ───────────────────
         latch_aps = [rec for rec in records.values() if rec.state == APState.LATCH]
         if latch_aps and not daemon_latch:
             daemon_latch = True
@@ -439,25 +425,17 @@ def _tick_ap(
     wired_ips: set[str],
     now_mono: float,
     args: argparse.Namespace,
-    password: str,
-    daemon_latch_ref: list,
+    daemon_latch: bool,
 ) -> None:
-    daemon_latch = daemon_latch_ref[0]
-
-    # ── LATCH: do nothing ─────────────────────────────────────
+    # ── LATCH：不再动作 ─────────────────────────────────────
     if rec.state == APState.LATCH or daemon_latch:
         return
 
     is_wired = ip in wired_ips
     reachable = is_reachable(ip, timeout=args.ping_timeout)
 
-    # Track unreachable / offline duration — debounced.
-    # A single dropped probe is noise (cold ARP right after start, transient
-    # loss), not an outage: 2026-09-27 one missed probe 4s after a service
-    # restart logged "went unreachable ... came back online after 64s" and read
-    # like a 64s outage when nothing happened (Switch-1 ether8 had zero link
-    # events all day). Require --unreachable-threshold consecutive failures
-    # before believing the AP is gone.
+    # 不可达/离线计时（防抖）：单次丢包是噪声（冷 ARP、瞬时丢包），
+    # 连续 --unreachable-threshold 次失败才认定 AP 离线。
     if not reachable:
         rec.ping_failures += 1
         if rec.offline_since is None and rec.ping_failures >= args.unreachable_threshold:
@@ -483,7 +461,7 @@ def _tick_ap(
 
     offline_duration = (now_mono - rec.offline_since) if rec.offline_since else 0.0
 
-    # ── REBOOTING: wait for wired recovery ───────────────────
+    # ── REBOOTING：等待有线恢复 ───────────────────
     if rec.state == APState.REBOOTING:
         elapsed = now_mono - rec.state_since
         if is_wired:
@@ -503,11 +481,11 @@ def _tick_ap(
             if rec.consecutive_failures >= args.max_failures:
                 rec.transition(APState.LATCH)
             else:
-                # Try again next cycle (go back to WIRELESS so trigger fires)
+                # 回到 WIRELESS，下个周期重新触发
                 rec.transition(APState.WIRELESS)
         return
 
-    # ── COOLDOWN: mandatory calm period after reboot ──────────
+    # ── COOLDOWN：重启后的强制冷静期 ──────────────────
     if rec.state == APState.COOLDOWN:
         elapsed = now_mono - rec.state_since
         if elapsed >= args.cooldown:
@@ -515,16 +493,16 @@ def _tick_ap(
             rec.transition(APState.OK if is_wired else APState.WIRELESS)
         return
 
-    # ── AP unreachable: do not trigger reboot ─────────────────
+    # ── AP 不可达：不触发重启 ─────────────────
     if not reachable:
         if offline_duration < args.offline_grace:
             logging.debug(
                 "[%s] unreachable for %.0f/%ds (offline grace)", rec.name,
                 offline_duration, args.offline_grace,
             )
-            # Suppress state changes while inside grace window
+            # 宽限期内不改状态
             return
-        # Long absence — likely power cut or maintenance.  Stay put, no reboot.
+        # 长时间不可达——多为断电/维护，保持现状、不重启。
         if rec.state != APState.WIRELESS:
             logging.info(
                 "[%s] unreachable for %.0fs (offline grace exhausted); holding",
@@ -533,7 +511,7 @@ def _tick_ap(
             rec.transition(APState.WIRELESS)
         return
 
-    # ── Reachable: evaluate link type ─────────────────────────
+    # ── 可达：判断链路类型 ─────────────────────────
     if is_wired:
         if rec.state != APState.OK:
             logging.info("[%s] link_type=wired; back to OK", rec.name)
@@ -541,12 +519,12 @@ def _tick_ap(
         rec.transition(APState.OK)
         return
 
-    # link_type != "wired" and device is reachable
+    # link_type 非 wired 且设备可达
     if rec.state == APState.OK:
         rec.transition(APState.WIRELESS)
         logging.warning("[%s] switched to wireless backhaul", rec.name)
 
-    # WIRELESS: check dwell time before rebooting
+    # WIRELESS：驻留时间达标才重启
     wireless_secs = now_mono - rec.state_since
     if wireless_secs < args.wireless_dwell:
         logging.debug(
@@ -555,7 +533,7 @@ def _tick_ap(
         )
         return
 
-    # Trigger reboot
+    # 触发重启
     attempt = rec.consecutive_failures + 1
     logging.warning(
         "[%s] wireless for %.0fs; rebooting (attempt %d/%d)",
@@ -608,7 +586,7 @@ def _sleep(seconds: int, stop_fn) -> None:
 
 
 # ──────────────────────────────────────────────
-# CLI
+# 命令行
 # ──────────────────────────────────────────────
 
 def main() -> None:
@@ -622,7 +600,7 @@ def main() -> None:
     p.add_argument("--password-file", required=True,
                    help="Path to file containing the AP admin password (sops-rendered)")
 
-    # Timing
+    # 时间参数
     p.add_argument("--check-interval", type=int, default=60,
                    help="Seconds between topology polls (default: 60)")
     p.add_argument("--wireless-dwell", type=int, default=120,
@@ -636,11 +614,11 @@ def main() -> None:
     p.add_argument("--offline-grace", type=int, default=600,
                    help="Seconds an AP may be unreachable before we consider it a long-term absence (power cut / maintenance); no reboot is issued during this window or after (default: 600)")
 
-    # Failure cap
+    # 失败上限
     p.add_argument("--max-failures", type=int, default=3,
                    help="Consecutive failures before LATCH and email alert (default: 3)")
 
-    # Mail
+    # 邮件
     p.add_argument("--mail-to", default="",
                    help="Alert recipient email address")
     p.add_argument("--mail-from", default="",
@@ -648,7 +626,7 @@ def main() -> None:
     p.add_argument("--sendmail", default="/run/wrappers/bin/sendmail",
                    help="Path to sendmail binary (default: /run/wrappers/bin/sendmail)")
 
-    # Misc
+    # 其他
     p.add_argument("--api-timeout", type=int, default=10,
                    help="HTTP timeout for Xiaomi API calls in seconds (default: 10)")
     p.add_argument("--ping-timeout", type=int, default=2,

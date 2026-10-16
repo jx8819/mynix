@@ -1,4 +1,4 @@
-# Herdr — terminal workspace manager for AI coding agents
+# Herdr — AI 编码代理的终端工作区管理器（NixOS 模块）
 { config, lib, pkgs, ... }:
 
 let
@@ -89,25 +89,36 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # 只遍历一次 cfg.users 汇总四项断言输入，四组断言仍按「先断言项、后用户」
+    # 的原顺序拼接，config.assertions 的值逐项与原先一致。
     assertions =
-      lib.mapAttrsToList (name: _: {
-        assertion = builtins.hasAttr name config.users.users;
-        message = "programs.herdr.users.${name} refers to an undefined NixOS user; define users.users.${name}.";
-      }) cfg.users
-      ++ lib.mapAttrsToList (name: _: {
-        assertion =
-          !builtins.hasAttr name config.users.users
-          || config.users.users.${name}.enable;
-        message = "programs.herdr.users.${name} refers to a disabled NixOS user; enable users.users.${name}.";
-      }) cfg.users
-      ++ lib.mapAttrsToList (name: userCfg: {
-        assertion = userCfg.settings == { } || userCfg.configFile == null;
-        message = "programs.herdr.users.${name}.settings and configFile are mutually exclusive; set only one.";
-      }) cfg.users
-      ++ lib.mapAttrsToList (name: userCfg: {
-        assertion = userCfg.configFile == null || lib.hasPrefix "/" userCfg.configFile;
-        message = "programs.herdr.users.${name}.configFile must be an absolute runtime path.";
-      }) cfg.users;
+      let
+        checks = lib.mapAttrsToList (name: userCfg: {
+          inherit name;
+          defined = builtins.hasAttr name config.users.users;
+          enabled =
+            !builtins.hasAttr name config.users.users
+            || config.users.users.${name}.enable;
+          settingsEmptyOrConfigFile = userCfg.settings == { } || userCfg.configFile == null;
+          configFileAbsolute = userCfg.configFile == null || lib.hasPrefix "/" userCfg.configFile;
+        }) cfg.users;
+      in
+      map (c: {
+        assertion = c.defined;
+        message = "programs.herdr.users.${c.name} refers to an undefined NixOS user; define users.users.${c.name}.";
+      }) checks
+      ++ map (c: {
+        assertion = c.enabled;
+        message = "programs.herdr.users.${c.name} refers to a disabled NixOS user; enable users.users.${c.name}.";
+      }) checks
+      ++ map (c: {
+        assertion = c.settingsEmptyOrConfigFile;
+        message = "programs.herdr.users.${c.name}.settings and configFile are mutually exclusive; set only one.";
+      }) checks
+      ++ map (c: {
+        assertion = c.configFileAbsolute;
+        message = "programs.herdr.users.${c.name}.configFile must be an absolute runtime path.";
+      }) checks;
 
     environment.systemPackages = [ cfg.package ];
 

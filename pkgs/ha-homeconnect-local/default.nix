@@ -1,7 +1,5 @@
-# ha-homeconnect-local — Siemens / Bosch Home Connect Local integration for Home Assistant
-#
-# Upstream: https://github.com/chris-mc1/homeconnect_local_hass
-# Domain: homeconnect_ws
+# ha-homeconnect-local — Siemens/Bosch Home Connect Local 的 HA 集成（domain: homeconnect_ws）。
+# 依赖 homeconnect-websocket（nixpkgs 未收录，见 ./homeconnect-websocket.nix），走局域网直连。
 { lib
 , buildHomeAssistantComponent
 , fetchFromGitHub

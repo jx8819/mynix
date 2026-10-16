@@ -1,18 +1,17 @@
 #!/usr/bin/env python3
-"""miloco-omp-agent — Miloco agent webhook → OMP RPC bridge.
+"""miloco-omp-agent — Miloco agent webhook → OMP RPC 桥。
 
-Speaks Miloco's webhook protocol (see miloco.utils.agent_client) on one side and
-drives a restricted `omp --mode rpc` child on the other.
+一端讲 Miloco 的 webhook 协议（见 miloco.utils.agent_client），
+另一端驱动受限的 `omp --mode rpc` 子进程。
 
-Security model (the whole point of this bridge):
-  * The OMP child runs with --no-tools --no-extensions --no-skills --no-rules
-    --no-lsp, i.e. NO shell, NO filesystem, NO network tools.
-  * Its only capabilities are the host tools registered here, and every one of
-    them is a Mi Home device/scene call proxied to the Miloco backend.
-  * Any did the household denies is rejected in this process, before the HTTP
-    request to Miloco is built.
+安全模型（本桥存在的意义）：
+  * OMP 子进程以 --no-tools --no-extensions --no-skills --no-rules --no-lsp
+    启动：没有 shell、文件、网络、代码工具。
+  * 它唯一的能力是这里注册的宿主工具，全部是代理到 Miloco 后端的
+    米家设备/场景调用。
+  * 家庭策略拒绝的 did 在本进程内、构造发往 Miloco 的 HTTP 请求之前就被拒绝。
 
-Webhook contract (miloco.utils.agent_client.call_agent_webhook):
+Webhook 契约（miloco.utils.agent_client.call_agent_webhook）：
   POST {action, payload} + Authorization: Bearer <agent.auth_bearer>
   200  {code: 0, message: "ok", data: ...}      (code != 0 -> AgentWebhookException)
   actions: "agent" | "get_trace" | "reset_sessions"
@@ -38,21 +37,26 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 log = logging.getLogger("miloco-omp-agent")
 
-MAX_TOOL_RESULT_BYTES = 96 * 1024  # stay well under the 1 MiB RPC frame cap
+MAX_TOOL_RESULT_BYTES = 96 * 1024  # 远低于 1 MiB 的 RPC 帧上限
 IDEMPOTENCY_TTL_S = 15 * 60
 IDEMPOTENCY_MAX = 512
 TRACE_TTL_S = 7 * 24 * 3600
 
 
-# ── small helpers ────────────────────────────────────────────────────────────
+# ── 小工具 ──────────────────────────────────────────────────────────────────
 
 def read_secret(path: str) -> str:
     with open(path, "r", encoding="utf-8") as fh:
         return fh.read().strip()
 
 
+def _safe_id(s: str) -> str:
+    """把任意 id 归一成安全的文件/目录名字符集（与会话目录命名一致）。"""
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", s)
+
+
 def http_json(method: str, url: str, body=None, headers=None, timeout: float = 30.0):
-    """Minimal JSON HTTP client (stdlib only). Returns (status, parsed_or_text)."""
+    """极简 JSON HTTP 客户端（仅标准库）。返回 (status, 解析结果或原文)。"""
     data = None
     hdrs = {"Accept": "application/json"}
     if headers:
@@ -68,7 +72,7 @@ def http_json(method: str, url: str, body=None, headers=None, timeout: float = 3
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", "replace")
         status = exc.code
-    except Exception as exc:  # transport-level
+    except Exception as exc:  # 传输层异常
         return 0, f"{type(exc).__name__}: {exc}"
     try:
         return status, json.loads(raw)
@@ -76,7 +80,7 @@ def http_json(method: str, url: str, body=None, headers=None, timeout: float = 3
         return status, raw
 
 
-# ── Miloco backend client (device/scene tools) ───────────────────────────────
+# ── Miloco 后端客户端（设备/场景工具）───────────────────────────────────────
 
 class MilocoClient:
     def __init__(self, base_url: str, token: str):
@@ -109,7 +113,7 @@ class MilocoClient:
         return self._post(f"/api/miot/scenes/{urllib.parse.quote(scene_id)}/trigger")
 
 
-# ── host tool surface ────────────────────────────────────────────────────────
+# ── 宿主工具面 ──────────────────────────────────────────────────────────────
 
 def tool_defs(read_only: bool) -> list[dict]:
     devices = [
@@ -197,7 +201,7 @@ def tool_defs(read_only: bool) -> list[dict]:
 
 
 class ToolExecutor:
-    """Executes the Mi Home host tools, enforcing the household device policy."""
+    """执行米家宿主工具，并强制执行家庭设备策略。"""
 
     def __init__(self, miloco: MilocoClient, policy: dict, read_only: bool):
         self.miloco = miloco
@@ -255,34 +259,31 @@ class ToolExecutor:
         return ok, text
 
 
-# ── OMP RPC child session ────────────────────────────────────────────────────
+# ── OMP RPC 子进程会话 ──────────────────────────────────────────────────────
 
 class OmpSession:
-    """One `omp --mode rpc` child per Miloco sessionKey, with JSONL framing."""
+    """每个 Miloco sessionKey 一个 `omp --mode rpc` 子进程，JSONL 分帧。"""
 
     def __init__(self, key: str, cfg: dict, tools: ToolExecutor, tool_defs_json: list[dict]):
         self.key = key
         self.cfg = cfg
         self.tools = tools
         self.tool_defs_json = tool_defs_json
-        self.lock = threading.Lock()          # one turn at a time per session
-        self.frame_q: list[dict] = []
-        self.frame_cv = threading.Condition(self.lock)
+        self.lock = threading.Lock()          # 每会话一次只跑一个 turn
         self.proc: subprocess.Popen | None = None
         self.reader: threading.Thread | None = None
         self.pending: dict[str, threading.Event] = {}
         self.responses: dict[str, dict] = {}
         self.turn_done = threading.Event()
-        self.turn_error: str | None = None
         self.reply_text: list[str] = []
         self.stats: dict = {}
         self._boot()
 
-    # ── process lifecycle ──
+    # ── 进程生命周期 ──
     def _boot(self) -> None:
         omp = self.cfg["omp"]
         state_dir = omp["stateDir"]
-        session_dir = os.path.join(omp["sessionDir"], re.sub(r"[^A-Za-z0-9_.-]", "_", self.key))
+        session_dir = os.path.join(omp["sessionDir"], _safe_id(self.key))
         os.makedirs(session_dir, exist_ok=True)
         os.makedirs(omp["cwd"], exist_ok=True)
         os.makedirs(os.path.join(state_dir, "tmp"), exist_ok=True)
@@ -315,7 +316,7 @@ class OmpSession:
         self.reader = threading.Thread(target=self._read_loop, daemon=True)
         self.reader.start()
 
-        # register the Mi Home host tools before the first prompt
+        # 首个 prompt 前先注册米家宿主工具
         resp = self._request({"type": "set_host_tools", "tools": self.tool_defs_json}, timeout=60.0)
         if not resp.get("success"):
             raise RuntimeError(f"set_host_tools failed: {resp.get('error')}")
@@ -426,13 +427,12 @@ class OmpSession:
         except Exception:
             log.exception("failed to deliver host_tool_result")
 
-    # ── turn execution ──
+    # ── turn 执行 ──
     def run_turn(self, message: str, timeout_s: float) -> dict:
         with self.lock:
             if self.proc is None or self.proc.poll() is not None:
                 self._boot()
             self.turn_done.clear()
-            self.turn_error = None
             self.reply_text = []
             self.stats = {}
             started = time.monotonic()
@@ -459,7 +459,7 @@ class OmpSession:
                 "stats": {k: v for k, v in self.stats.items() if not k.startswith("_")},
             }
 
-    def reset(self, delete_transcript: bool) -> None:
+    def reset(self) -> None:
         with self.lock:
             try:
                 if self.proc and self.proc.poll() is None:
@@ -474,7 +474,7 @@ class OmpSession:
         return self.proc is not None and self.proc.poll() is None
 
 
-# ── bridge service ───────────────────────────────────────────────────────────
+# ── 桥接服务 ────────────────────────────────────────────────────────────────
 
 class Bridge:
     def __init__(self, cfg: dict):
@@ -491,7 +491,7 @@ class Bridge:
         self.trace_dir = os.path.join(cfg["omp"]["stateDir"], "traces")
         os.makedirs(self.trace_dir, exist_ok=True)
 
-    # ── session registry ──
+    # ── 会话注册表 ──
     def session(self, key: str) -> OmpSession:
         with self.sessions_lock:
             sess = self.sessions.get(key)
@@ -501,11 +501,11 @@ class Bridge:
             self.sessions[key] = sess
             return sess
 
-    # ── actions ──
+    # ── action 处理 ──
     def action_agent(self, payload: dict) -> dict:
         resolve_target = payload.get("resolveTarget")
         if resolve_target == "owner-channel":
-            # no IM channel is bound to this bridge; report it structurally
+            # 本桥没有绑定 IM 频道，按结构如实上报
             return {"status": "no-channel"}
 
         idem_key = payload.get("idempotencyKey") or payload.get("traceId")
@@ -547,7 +547,7 @@ class Bridge:
         run_id = str(payload.get("runId") or "")
         trace = self.traces.get(run_id)
         if trace is None:
-            path = os.path.join(self.trace_dir, f"{re.sub(r'[^A-Za-z0-9_.-]', '_', run_id)}.json")
+            path = os.path.join(self.trace_dir, f"{_safe_id(run_id)}.json")
             if os.path.exists(path):
                 with open(path, "r", encoding="utf-8") as fh:
                     trace = json.load(fh)
@@ -563,12 +563,11 @@ class Bridge:
             targets = [k for k in self.sessions if not keys or k in keys]
             for key in targets:
                 sess = self.sessions.pop(key)
-                sess.reset(delete)
+                sess.reset()
                 reset += 1
                 if delete:
                     shutil.rmtree(
-                        os.path.join(self.cfg["omp"]["sessionDir"],
-                                     re.sub(r"[^A-Za-z0-9_.-]", "_", key)),
+                        os.path.join(self.cfg["omp"]["sessionDir"], _safe_id(key)),
                         ignore_errors=True)
         log.info("reset_sessions keys=%s delete=%s reset=%d", keys, delete, reset)
         return {"reset": reset}
@@ -596,7 +595,7 @@ class Bridge:
             "reply": (result.get("reply") or "")[:2000],
         }
         self.traces[run_id] = trace
-        safe = re.sub(r"[^A-Za-z0-9_.-]", "_", run_id)
+        safe = _safe_id(run_id)
         try:
             with open(os.path.join(self.trace_dir, f"{safe}.json"), "w", encoding="utf-8") as fh:
                 json.dump(trace, fh, ensure_ascii=False)
@@ -629,7 +628,7 @@ class Handler(BaseHTTPRequestHandler):
     allowed_ips: list[str]
     server_version = "miloco-omp-agent/1"
 
-    def log_message(self, fmt, *args):  # route access logs through logging
+    def log_message(self, fmt, *args):  # 访问日志走 logging 统一输出
         log.info("http %s", fmt % args)
 
     def _deny(self, code: int, message: str) -> None:

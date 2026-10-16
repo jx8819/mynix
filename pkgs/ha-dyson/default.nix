@@ -1,8 +1,5 @@
-# ha-dyson — Dyson 设备 Home Assistant 自定义组件（domain: dyson_local）
-#
-# 上游：https://github.com/libdyson-wg/ha-dyson（HACS 集成，替代旧 shenxn/ha-dyson）。
-# manifest.json requirements: ["libdyson-neon==1.6.0"]，nixpkgs 未收录，见同目录
-# libdyson.nix。组件额外依赖 HA 内建的 mqtt / zeroconf 集成，无需 python 包。
+# ha-dyson — Dyson 设备的 HA 自定义组件（domain: dyson_local）。
+# 依赖 libdyson-neon（nixpkgs 未收录，见 ./libdyson.nix）；另需 HA 内建 mqtt/zeroconf 集成，无额外 python 包。
 { lib
 , home-assistant
 , fetchFromGitHub
@@ -21,8 +18,7 @@ buildHomeAssistantComponent rec {
     hash = "sha256-C5UDK0st0IR3PRsbiG9M9ZfGpDrPYqBcPw/8/2iWJXw=";
   };
 
-  # 必须用 home-assistant 的 python 包集（nixpkgs 对 custom-components 也这么接），
-  # 否则 python 版本对不上 buildHomeAssistantComponent 的解释器。
+  # 必须用 home-assistant 的 python 包集，否则解释器对不上 buildHomeAssistantComponent。
   dependencies = [
     (home-assistant.python3Packages.callPackage ./libdyson.nix { })
   ];

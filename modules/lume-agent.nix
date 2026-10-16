@@ -4,6 +4,30 @@
 
 let
   cfg = config.services.lume-agent;
+
+  # 配置模板：除 secret 外全部在 eval 期生成；secret 是运行期凭据，
+  # 由 ExecStartPre 替换占位符注入，明文不进 Nix store。
+  configTemplate = pkgs.writeText "lume-agent-config.template.json" (builtins.toJSON {
+    node = {
+      id = cfg.nodeId;
+      display_name = cfg.displayName;
+      role = cfg.role;
+      group = cfg.group;
+      region = cfg.region;
+      stale_seconds = 180;
+      display_order = cfg.displayOrder;
+      color = cfg.color;
+      offline_severity = "P1";
+      ip_change_severity = "P2";
+    };
+    endpoint = cfg.endpoint;
+    secret = "@SECRET@";
+    report_interval_seconds = cfg.reportInterval;
+    probe_interval_seconds = cfg.probeInterval;
+    services = map (name: { inherit name; label = name; severity = "P1"; }) cfg.monitoredServices;
+    probes = cfg.probes;
+    spool_path = "/var/lib/vpsmon/spool.json";
+  });
 in
 {
   options.services.lume-agent = {
@@ -17,7 +41,7 @@ in
 
     nodeId = lib.mkOption {
       type = lib.types.str;
-      description = "节点全局唯一 ID (如 jp, us, kr, nix-lz)。";
+      description = "节点全局唯一 ID (如 jp, us, kr)。";
     };
 
     displayName = lib.mkOption {
@@ -61,8 +85,8 @@ in
     };
 
     secretFile = lib.mkOption {
-      type = lib.types.path;
-      description = "节点 HMAC 签名密钥文件路径 (sops 渲染的 secret)。";
+      type = lib.types.str;
+      description = "节点 HMAC 签名密钥文件路径 (运行期渲染的 secret，内容应为 base64/hex 等 JSON 安全字符)。";
     };
 
     reportInterval = lib.mkOption {
@@ -117,11 +141,10 @@ in
         Restart = "always";
         RestartSec = "10s";
 
-        # 状态与持久化目录：/var/lib/vpsmon
         StateDirectory = "vpsmon";
         StateDirectoryMode = "0750";
 
-        # 安全沙箱 (符合上游设计契约)
+        # 安全沙箱（对齐上游设计约束）
         NoNewPrivileges = true;
         CapabilityBoundingSet = "";
         AmbientCapabilities = "";
@@ -132,41 +155,9 @@ in
         ExecStartPre = pkgs.writeShellScript "lume-agent-pre-start" ''
           set -euo pipefail
           SECRET=$(cat "${cfg.secretFile}" | tr -d '\r\n')
-          ${pkgs.jq}/bin/jq -n \
-            --arg id "${cfg.nodeId}" \
-            --arg name "${cfg.displayName}" \
-            --arg role "${cfg.role}" \
-            --arg grp "${cfg.group}" \
-            --arg reg "${cfg.region}" \
-            --arg color "${cfg.color}" \
-            --argjson order ${toString cfg.displayOrder} \
-            --arg ep "${cfg.endpoint}" \
-            --arg secret "$SECRET" \
-            --argjson repInt ${toString cfg.reportInterval} \
-            --argjson prbInt ${toString cfg.probeInterval} \
-            --argjson srvs '${builtins.toJSON cfg.monitoredServices}' \
-            --argjson prbs '${builtins.toJSON cfg.probes}' \
-            '{
-              node: {
-                id: $id,
-                display_name: $name,
-                role: $role,
-                group: $grp,
-                region: $reg,
-                stale_seconds: 180,
-                display_order: $order,
-                color: $color,
-                offline_severity: "P1",
-                ip_change_severity: "P2"
-              },
-              endpoint: $ep,
-              secret: $secret,
-              report_interval_seconds: $repInt,
-              probe_interval_seconds: $prbInt,
-              services: ($srvs | map({name: ., label: ., severity: "P1"})),
-              probes: $prbs,
-              spool_path: "/var/lib/vpsmon/spool.json"
-            }' > /var/lib/vpsmon/config.json
+          JSON_SECRET=$(printf '%s' "$SECRET" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g')
+          CONTENT=$(cat ${configTemplate})
+          printf '%s%s%s\n' "''${CONTENT%%@SECRET@*}" "$JSON_SECRET" "''${CONTENT#*@SECRET@}" > /var/lib/vpsmon/config.json
           chmod 600 /var/lib/vpsmon/config.json
         '';
 

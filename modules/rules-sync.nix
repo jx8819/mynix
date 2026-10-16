@@ -3,25 +3,14 @@
 let
   cfg = config.services.rulesSync;
 
-  directDomainsFile = pkgs.writeText "rules-sync-direct-domains.txt" (
-    lib.concatStringsSep "\n" cfg.directDomains + "\n"
-  );
+  # 域名列表落盘为逐行文本（末尾补换行）；同名同内容生成同一 store 路径
+  mkLinesFile = name: domains:
+    pkgs.writeText name (lib.concatStringsSep "\n" domains + "\n");
 
-  proxyDomainsFile = pkgs.writeText "rules-sync-proxy-domains.txt" (
-    lib.concatStringsSep "\n" cfg.proxyDomains + "\n"
-  );
-
-  cleanIpDomainsFile = pkgs.writeText "rules-sync-clean-ip-domains.txt" (
-    lib.concatStringsSep "\n" cfg.cleanIpDomains + "\n"
-  );
-
-  tmdbDomainsFile = pkgs.writeText "rules-sync-tmdb-domains.txt" (
-    lib.concatStringsSep "\n" cfg.tmdbDns.domains + "\n"
-  );
-
-  tmdbFlags = lib.optionalString cfg.tmdbDns.enable
-    " -tmdb-domains-file ${tmdbDomainsFile} -tmdb-edns-subnet ${cfg.tmdbDns.ednsClientSubnet}";
-
+  directDomainsFile = mkLinesFile "rules-sync-direct-domains.txt" cfg.directDomains;
+  proxyDomainsFile = mkLinesFile "rules-sync-proxy-domains.txt" cfg.proxyDomains;
+  cleanIpDomainsFile = mkLinesFile "rules-sync-clean-ip-domains.txt" cfg.cleanIpDomains;
+  tmdbDomainsFile = mkLinesFile "rules-sync-tmdb-domains.txt" cfg.tmdbDns.domains;
 
   sourcesFile = pkgs.writeText "rules-sync-sources.json" (builtins.toJSON {
     gfwlist = cfg.gfwlistSources;
@@ -32,6 +21,38 @@ let
 
   dnsmasqForwardsFile = pkgs.writeText "rules-sync-dnsmasq-forwards.json"
     (builtins.toJSON cfg.dnsmasqForwards);
+
+  # 生成器命令行参数按固定顺序拼接；-tmdb-* 仅在 tmdbDns 开启时追加，
+  # -tmdb-edns-subnet 仅在 ECS 非空时追加（空值即关闭），-debug 收尾
+  generatorArgs =
+    [
+      "-out" "${cfg.outputDir}"
+      "-direct-domains-file" "${directDomainsFile}"
+      "-proxy-domains-file" "${proxyDomainsFile}"
+      "-clean-ip-domains-file" "${cleanIpDomainsFile}"
+      "-sources" "${sourcesFile}"
+      "-dnsmasq-forwards-file" "${dnsmasqForwardsFile}"
+    ]
+    ++ lib.optionals cfg.tmdbDns.enable (
+      [ "-tmdb-domains-file" "${tmdbDomainsFile}" ]
+      ++ lib.optionals (cfg.tmdbDns.ednsClientSubnet != "") [ "-tmdb-edns-subnet" "${cfg.tmdbDns.ednsClientSubnet}" ]
+    )
+    ++ lib.optional cfg.debug "-debug";
+
+  # 上游源子模块公共字段：name 供日志/报错定位，url 为下载地址；extra 为各源特有字段
+  mkSourceSubmodule = urlDescription: extra:
+    lib.types.submodule {
+      options = {
+        name = lib.mkOption {
+          type = lib.types.str;
+          description = "Unique source identifier, used in logs and errors.";
+        };
+        url = lib.mkOption {
+          type = lib.types.str;
+          description = urlDescription;
+        };
+      } // extra;
+    };
 in
 {
   options.services.rulesSync = {
@@ -57,44 +78,40 @@ in
 
     user = lib.mkOption {
       type = lib.types.str;
-      default = "github-sync";
-      description = "User to run the generator service.";
+      default = "rules-sync";
+      description = "Account the service runs as; created unconditionally by this module.";
     };
 
     group = lib.mkOption {
       type = lib.types.str;
       default = "github-sync";
-      description = "Group to run the generator service.";
+      description = "Group of the service account; created unconditionally by this module.";
     };
 
     directDomains = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
-      description = "Direct whitelist domains to exclude from proxy rules";
+      description = "Direct whitelist domains excluded from proxy rules.";
     };
 
     proxyDomains = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
-      description = "Custom proxy domains to include in proxy rules";
+      description = "Custom proxy domains included in proxy rules.";
     };
 
     cleanIpDomains = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
-      description = "Clean IP domains to route through clean egress proxies (generated into rules/clean-ip.txt and domain.rsc)";
+      description = "Clean IP domains routed through clean egress proxies (generated into rules/clean-ip.txt and domain.rsc).";
     };
 
     tmdbDns = {
-      enable = lib.mkEnableOption ''
-        DNS-TMDB 静态映射生成（tmdb.rsc）：用大厂 DoH（Google/Cloudflare）取 TMDB 域名
-        真实 A 记录，经 TLS SNI 握手逐 IP 校验后输出 RouterOS /ip dns static 映射，
-        让全网直连 TMDB（思路源自 github.com/myzhongqiang/DNS-TMDB，解析通道换大厂并加硬校验）
-      '';
+      enable = lib.mkEnableOption "DNS-TMDB 静态映射生成（tmdb.rsc）：DoH 取 TMDB 域名真实 A 记录并经 TLS SNI 校验后输出 /ip dns static 映射，供全网直连";
       domains = lib.mkOption {
         type = lib.types.listOf lib.types.str;
         default = [ "api.themoviedb.org" "image.tmdb.org" "www.themoviedb.org" ];
-        description = "TMDB 域名列表（默认即 DNS-TMDB 的三个域名），可增删。";
+        description = "TMDB 域名列表，默认为其三个常用域名，可增删。";
       };
       ednsClientSubnet = lib.mkOption {
         type = lib.types.str;
@@ -103,7 +120,6 @@ in
       };
     };
 
-    # 同一份 clean-list 可生成多个 dnsmasq 上游配置；default 沿用原有文件名。
     dnsmasqForwards = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule {
         options = {
@@ -130,79 +146,37 @@ in
     };
 
     gfwlistSources = lib.mkOption {
-      type = lib.types.listOf (lib.types.submodule {
-        options = {
-          name = lib.mkOption {
-            type = lib.types.str;
-            description = "Unique source identifier, used in logs and errors.";
-          };
-          url = lib.mkOption {
-            type = lib.types.str;
-            description = "Download URL of the GFW list source.";
-          };
-          format = lib.mkOption {
-            type = lib.types.enum [ "gfwlist" "fancyss" "plain" "microsoft" ];
-            description = "Parser applied to the downloaded source: gfwlist (base64 autoproxy), fancyss (dnsmasq ipset lines), plain (raw domain lines), microsoft (DOMAIN-SUFFIX rules).";
-          };
+      type = lib.types.listOf (mkSourceSubmodule "Download URL of the GFW list source." {
+        format = lib.mkOption {
+          type = lib.types.enum [ "gfwlist" "fancyss" "plain" "microsoft" ];
+          description = "Parser applied to the downloaded source: gfwlist (base64 autoproxy), fancyss (dnsmasq ipset lines), plain (raw domain lines), microsoft (DOMAIN-SUFFIX rules).";
         };
       });
       default = [];
-      description = "GFW list sources feeding clean-list generation, processed in list order. Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
+      description = "GFW list sources for clean-list generation, processed in list order; empty by default, populate in your private consumer.";
     };
 
     aiSources = lib.mkOption {
-      type = lib.types.listOf (lib.types.submodule {
-        options = {
-          name = lib.mkOption {
-            type = lib.types.str;
-            description = "Unique source identifier, used in logs and errors.";
-          };
-          url = lib.mkOption {
-            type = lib.types.str;
-            description = "Download URL of the clash-ai-rules YAML source.";
-          };
-        };
-      });
+      type = lib.types.listOf (mkSourceSubmodule "Download URL of the clash-ai-rules YAML source." {});
       default = [];
-      description = "AI rule sources feeding rules/ai.yaml and the clean-ai domain set. Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
+      description = "AI rule sources for rules/ai.yaml and the clean-ai domain set; empty by default, populate in your private consumer.";
     };
 
     googleSources = lib.mkOption {
-      type = lib.types.listOf (lib.types.submodule {
-        options = {
-          name = lib.mkOption {
-            type = lib.types.str;
-            description = "Unique source identifier, used in logs and errors.";
-          };
-          url = lib.mkOption {
-            type = lib.types.str;
-            description = "Download URL of the Google rules source.";
-          };
-        };
-      });
+      type = lib.types.listOf (mkSourceSubmodule "Download URL of the Google rules source." {});
       default = [];
-      description = "Google rules sources; each entry is transformed into rules/google_rules.yaml (payload sections are concatenated in list order). Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
+      description = "Google rule sources concatenated in list order into rules/google_rules.yaml; empty by default, populate in your private consumer.";
     };
 
     ruleSources = lib.mkOption {
-      type = lib.types.listOf (lib.types.submodule {
-        options = {
-          name = lib.mkOption {
-            type = lib.types.str;
-            description = "Unique source identifier, used in logs and errors.";
-          };
-          url = lib.mkOption {
-            type = lib.types.str;
-            description = "Download URL of the rule file.";
-          };
-          output = lib.mkOption {
-            type = lib.types.str;
-            description = "Output path relative to outputDir. Must be a relative path without .. segments. .yaml outputs get non-ASCII payload filtering.";
-          };
+      type = lib.types.listOf (mkSourceSubmodule "Download URL of the rule file." {
+        output = lib.mkOption {
+          type = lib.types.str;
+          description = "Output path relative to outputDir, without .. segments; .yaml outputs get non-ASCII payload filtering.";
         };
       });
       default = [];
-      description = "Rule files downloaded verbatim to their configured output path. Any number of entries is allowed. All upstream sources are private deployment data: this public module ships empty defaults; populate them in your private consumer.";
+      description = "Rule files downloaded verbatim to their configured output paths; empty by default, populate in your private consumer.";
     };
 
     calendar = lib.mkOption {
@@ -229,30 +203,20 @@ in
       }
     ];
 
-    users.users.${cfg.user} = lib.mkIf (cfg.user == "github-sync") {
+    # 服务账号/组由本模块无条件创建，不依赖特定账号名
+    users.users.${cfg.user} = {
       isSystemUser = true;
       group = cfg.group;
       description = "ros-rules-generator lists sync";
     };
 
-    users.groups.${cfg.group} = lib.mkIf (cfg.group == "github-sync") {};
+    users.groups.${cfg.group} = {};
 
     systemd.tmpfiles.rules = [
-      # 确保父目录存在，属主为服务运行用户，0755 权限使 caddy 进程可进入
+      # 预建输出目录父目录并交权服务账号；0755 保证服务可写、下游读取进程可进入
       "d ${builtins.dirOf cfg.outputDir} 0755 ${cfg.user} ${cfg.group} - -"
     ];
 
-    # 平滑切换：彻底停用并禁用旧的 github.service 与 github.timer，防止与新服务发生写入竞态
-    systemd.services.github = {
-      enable = false;
-      wantedBy = lib.mkForce [];
-    };
-    systemd.timers.github = {
-      enable = false;
-      wantedBy = lib.mkForce [];
-    };
-
-    # 规则生成 Oneshot 服务
     systemd.services.rules-sync = {
       description = "Generate RouterOS and Clash DNS/IP routing rules";
       after = [ "network-online.target" ];
@@ -261,12 +225,13 @@ in
         Type = "oneshot";
         User = cfg.user;
         Group = cfg.group;
-        ExecStart = "${cfg.package}/bin/ros-rules-generator -out ${cfg.outputDir} -direct-domains-file ${directDomainsFile} -proxy-domains-file ${proxyDomainsFile} -clean-ip-domains-file ${cleanIpDomainsFile} -sources ${sourcesFile} -dnsmasq-forwards-file ${dnsmasqForwardsFile}${tmdbFlags}${lib.optionalString cfg.debug " -debug"}";
+        # 参数表经 escapeShellArgs 转义拼接，值含空格等特殊字符时自动加引号
+        ExecStart = lib.escapeShellArgs ([ "${cfg.package}/bin/ros-rules-generator" ] ++ generatorArgs);
 
-        # 显式指定 UMask 为 0022，保证目录 0755 与文件 0644 的权限确定性
+        # UMask 0022：生成物权限固化为目录 0755、文件 0644
         UMask = "0022";
 
-        # 沙箱加固防护
+        # 沙箱加固：限制服务权限面
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectHome = true;
@@ -287,7 +252,6 @@ in
       };
     };
 
-    # 规则更新定时器
     systemd.timers.rules-sync = {
       description = "Timer for RouterOS rules generator";
       wantedBy = [ "timers.target" ];

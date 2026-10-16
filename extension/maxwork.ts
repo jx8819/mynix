@@ -12,8 +12,8 @@
 // 初始化时一次性构建，异步注册会导致命令不出现在补全中）。配置文件用
 // node:fs 同步读取；状态文件在 handler 里异步读写。
 //
-// 环境相关值全部来自 <agentDir>/maxwork.config.json（可由 Nix 渲染），
-// 本文件零环境硬编码，可公开分发。
+// 环境相关值（命令名、模型角色、探测端点/供应商等）全部来自
+// <agentDir>/maxwork.config.json（由 Nix 渲染），本文件不含环境值，可公开分发。
 
 import type {
 	ExtensionAPI,
@@ -31,6 +31,7 @@ interface MaxworkConfig {
 	modelRoles: string[]; // 按优先级回退链
 	thinkingLevel: string;
 	modelProbeUrl: string;
+	modelProbeProvider: string; // models.yml 中取 apiKey 的 provider 块名
 	defaultMode: Mode;
 	codex: {
 		home: string;
@@ -51,6 +52,7 @@ const DEFAULTS: MaxworkConfig = {
 	modelRoles: ["@slow", "@default"],
 	thinkingLevel: "max",
 	modelProbeUrl: "",
+	modelProbeProvider: "",
 	defaultMode: "codex",
 	codex: { home: "", outDir: "", tmpdir: "/tmp", timeoutSec: 300 },
 };
@@ -66,7 +68,7 @@ interface ModelCheck {
 	fellBack: boolean;
 }
 
-// 多处调用点共用同一基准目录，保留具名函数。
+// 多处调用点共用同一基准目录。
 function agentDir(): string {
 	return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".omp", "agent");
 }
@@ -83,6 +85,8 @@ function parseConfig(raw: unknown): Partial<MaxworkConfig> {
 	}
 	if (typeof o.thinkingLevel === "string") out.thinkingLevel = o.thinkingLevel;
 	if (typeof o.modelProbeUrl === "string") out.modelProbeUrl = o.modelProbeUrl;
+	if (typeof o.modelProbeProvider === "string")
+		out.modelProbeProvider = o.modelProbeProvider;
 	if (o.defaultMode === "omp" || o.defaultMode === "codex") {
 		out.defaultMode = o.defaultMode;
 	}
@@ -176,9 +180,15 @@ async function checkAdvisor(cfg: MaxworkConfig): Promise<CheckResult> {
 	}
 	try {
 		const modelsText = await Bun.file(join(agentDir(), "models.yml")).text().catch(() => "");
-		const m = /xiaomi-token-plan-cn:[\s\S]*?apiKey:\s*([^\s]+)/m.exec(modelsText);
-		const apiKey = m ? m[1] : "";
 		if (!cfg.modelProbeUrl) return { ok: true, detail: "advisor.enabled=true（modelProbeUrl 未配置，跳过 API 探测）" };
+		if (!cfg.modelProbeProvider) return { ok: true, detail: "advisor.enabled=true（modelProbeProvider 未配置，跳过 API 探测）" };
+		// provider 名按字面匹配：先转义正则元字符，再拼探测正则。
+		const provider = cfg.modelProbeProvider.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		const m = new RegExp(
+			`${provider}:[\\s\\S]*?apiKey:\\s*([^\\s]+)`,
+			"m",
+		).exec(modelsText);
+		const apiKey = m ? m[1] : "";
 		if (apiKey) {
 			const res = await fetch(cfg.modelProbeUrl, {
 				headers: { Authorization: `Bearer ${apiKey}` },

@@ -6,87 +6,89 @@
   outputs = { self, nixpkgs }:
     let
       system = "x86_64-linux";
+
+      # 单源包清单：包名只写这一遍（键 = pkgs/ 目录名），overlays.default 与 packages 共用。
+      # 值 = callPackage 变体："default" 走 prev.callPackage，"python" 走 prev.python3.pkgs.callPackage。
+      packageList = {
+        # Prometheus NUT（UPS）指标导出器
+        nut-exporter = "default";
+        # InfiniBand verbs 性能测试工具集
+        perftest = "default";
+        # Broadcom SAS3 IR 配置工具（闭源二进制，unfree）
+        sas3ircu = "default";
+        # Yacd-meta 仪表盘（mihomo external-ui）
+        yacd-meta = "default";
+        # OMP 编码代理 Web UI
+        ompweb = "default";
+        # omp 终端编码代理（can1357/oh-my-pi 源码打包）
+        omp = "default";
+        # 米家自动化规则列表同步 CLI（rules-sync 模块用）
+        ros-rules-generator = "default";
+        # 小米 Mesh 有线组网恢复看门狗
+        mesh-guardian = "default";
+        # HDSky（hdsky.me）自动签到
+        hdsky-checkin = "default";
+        # 米家高级自动化 MCP 服务
+        oh-my-sage = "default";
+        # Miloco agent webhook → 受限 OMP 桥（仅米家设备/场景工具）
+        miloco-omp-agent = "default";
+        # 米家设备 MCP 服务
+        miot-mcp = "default";
+        # ddddocr 验证码识别 python 库（nixpkgs 未收录，hdsky-checkin 的依赖），也可单独用
+        ddddocr = "python";
+        # HA 自定义组件：Dyson（domain: dyson_local）
+        ha-dyson = "default";
+        # HA 自定义组件：Cololight（domain: cololight）
+        ha-cololight = "default";
+        # HA 官方小米集成（domain: xiaomi_home，unfree）
+        ha-xiaomi-home = "default";
+        # HA 自定义组件：Home Connect Local（domain: homeconnect_ws）
+        ha-homeconnect-local = "default";
+        # Lume VPS 探针监控客户端（vpsmon-agent）
+        lume-agent = "default";
+      };
+
+      # 按清单构造包：每个键对应 ./pkgs/<键>，ddddocr 是 python 库走 python3.pkgs.callPackage。
+      mkOverlay = final: prev:
+        builtins.mapAttrs (name: variant: {
+          default = prev.callPackage;
+          python = prev.python3.pkgs.callPackage;
+        }.${variant} (./pkgs + "/${name}") { }) packageList;
+
       pkgs = import nixpkgs {
         inherit system;
         overlays = [ self.overlays.default ];
       };
     in
     {
+      # ── NixOS modules ──
       # maxwork 全力模式扩展（/maxwork）
       nixosModules.default = import ./modules/omp-maxwork.nix;
-      # ompweb Web UI NixOS module
+      # ompweb Web UI 服务
       nixosModules.ompweb = import ./modules/ompweb.nix;
-      # omp 编码代理（can1357/oh-my-pi 源码打包）NixOS module
+      # omp 编码代理服务
       nixosModules.omp = import ./modules/omp.nix;
-      # Supermicro IPMI 风扇调速 NixOS module
+      # Supermicro IPMI 风扇调速
       nixosModules.fan-control = import ./modules/fan-control.nix;
-      # ros-rules-generator 规则列表同步（systemd timer）NixOS module
+      # ros-rules-generator 规则列表同步（systemd timer）
       nixosModules.rules-sync = import ./modules/rules-sync.nix;
-      # Xiaomi Mesh 有线中继恢复看门狗 NixOS module
+      # 小米 Mesh 有线组网恢复看门狗
       nixosModules.mesh-guardian = import ./modules/mesh-guardian.nix;
-      # HDSky（hdsky.me）自动签到 NixOS module
+      # HDSky（hdsky.me）自动签到
       nixosModules.hdsky-checkin = import ./modules/hdsky-checkin.nix;
-      # Herdr terminal workspace manager NixOS module
+      # Herdr 终端工作区管理器
       nixosModules.herdr = import ./modules/herdr.nix;
-      # Home Assistant custom components module
+      # Home Assistant 自定义组件集合
       nixosModules.home-assistant-plugins = import ./modules/home-assistant-plugins.nix;
-      # Miloco agent webhook → OMP bridge（只给米家设备/场景工具）NixOS module
+      # Miloco agent webhook → OMP 桥（仅米家设备/场景工具）
       nixosModules.miloco-omp-agent = import ./modules/miloco-omp-agent.nix;
-      # Lume VPS 探针监控 Agent NixOS module
+      # Lume VPS 探针监控 Agent
       nixosModules.lume-agent = import ./modules/lume-agent.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
-      overlays.default = final: prev: {
-        mk-exporter = prev.callPackage ./pkgs/mk-exporter { };
-        nut-exporter = prev.callPackage ./pkgs/nut-exporter { };
-        perftest = prev.callPackage ./pkgs/perftest { };
-        sas3ircu = prev.callPackage ./pkgs/sas3ircu { };
-        yacd-meta = prev.callPackage ./pkgs/yacd-meta { };
-        ompweb = prev.callPackage ./pkgs/ompweb { };
-        omp = prev.callPackage ./pkgs/omp { };
-        ros-rules-generator = prev.callPackage ./pkgs/ros-rules-generator { };
-        mesh-guardian = prev.callPackage ./pkgs/mesh-guardian { };
-        hdsky-checkin = prev.callPackage ./pkgs/hdsky-checkin { };
-        oh-my-sage = prev.callPackage ./pkgs/oh-my-sage { };
-        # Miloco agent webhook → OMP bridge（仅米家设备/场景工具）
-        miloco-omp-agent = prev.callPackage ./pkgs/miloco-omp-agent { };
-        miot-mcp = prev.callPackage ./pkgs/miot-mcp { };
-        # python 库（nixpkgs 未收录），hdsky-checkin 的依赖；也可单独用
-        ddddocr = prev.python3.pkgs.callPackage ./pkgs/ddddocr { };
-        # Home Assistant 自定义组件（Dyson，domain: dyson_local）
-        ha-dyson = prev.callPackage ./pkgs/ha-dyson { };
-        # Home Assistant 自定义组件（Cololight，domain: cololight）
-        ha-cololight = prev.callPackage ./pkgs/ha-cololight { };
-        # Home Assistant 官方小米集成（domain: xiaomi_home）
-        ha-xiaomi-home = prev.callPackage ./pkgs/ha-xiaomi-home { };
-        # Home Assistant 自定义组件（Home Connect Local，domain: homeconnect_ws）
-        ha-homeconnect-local = prev.callPackage ./pkgs/ha-homeconnect-local { };
-        # Lume VPS 监控客户端 (vpsmon-agent)
-        lume-agent = prev.callPackage ./pkgs/lume-agent { };
-      };
+      overlays.default = mkOverlay;
 
-      # 临时使用：nix run github:jx8819/mynix#<name>
-      packages.${system} = {
-        inherit (pkgs)
-          mk-exporter
-          nut-exporter
-          perftest
-          ros-rules-generator
-          sas3ircu
-          yacd-meta
-          ompweb
-          omp
-          mesh-guardian
-          hdsky-checkin
-          oh-my-sage
-          miloco-omp-agent
-          miot-mcp
-          ddddocr
-          ha-dyson
-          ha-cololight
-          ha-xiaomi-home
-          ha-homeconnect-local
-          lume-agent;
-      };
+      # 临时使用：nix run github:jx8819/mynix#<name>；取值与 overlay 注入 pkgs 的同名属性一致
+      packages.${system} = builtins.intersectAttrs packageList pkgs;
     };
 }

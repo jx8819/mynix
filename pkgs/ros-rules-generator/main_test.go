@@ -454,3 +454,50 @@ func TestResolveTmdb(t *testing.T) {
 		t.Fatal("want error when no candidate IP passes the SNI check")
 	}
 }
+
+// TestCheckOutputsSetValidation 覆盖产物清单集合校验：期望文件名集合 vs 实际产出集合。
+func TestCheckOutputsSetValidation(t *testing.T) {
+	g := &Generator{
+		sources:         Sources{Rules: []RuleSource{{Name: "r", URL: "https://example.test/rules", Output: "rules/r.txt"}}},
+		dnsmasqForwards: []DnsmasqForward{{Name: "west", Target: "127.0.0.1", Port: 53}},
+	}
+	fullSet := func() []fileEntry {
+		files := make([]fileEntry, 0, len(baseOutputPaths)+2)
+		for _, p := range baseOutputPaths {
+			files = append(files, fileEntry{path: p, content: []byte("x")})
+		}
+		files = append(files,
+			fileEntry{path: "domain.dnsmasq.west.conf", content: []byte("x")},
+			fileEntry{path: "rules/r.txt", content: []byte("x")})
+		return files
+	}
+
+	if err := g.checkOutputs(fullSet(), false); err != nil {
+		t.Fatalf("complete output set rejected: %v", err)
+	}
+
+	missing := fullSet()
+	missing[0].path = "clean-list.missing"
+	if err := g.checkOutputs(missing, false); err == nil || !strings.Contains(err.Error(), "internal inconsistency") {
+		t.Fatalf("mismatched output set accepted: %v", err)
+	}
+
+	extra := append(fullSet(), fileEntry{path: "unexpected.txt", content: []byte("x")})
+	if err := g.checkOutputs(extra, false); err == nil || !strings.Contains(err.Error(), "internal inconsistency") {
+		t.Fatalf("unexpected extra output accepted: %v", err)
+	}
+
+	// TMDB 期望集合与开关对齐：关闭时多出 tmdb.rsc、开启时缺 tmdb.rsc 都必须拒绝
+	if err := g.checkOutputs(append(fullSet(), fileEntry{path: "tmdb.rsc", content: []byte("x")}), false); err == nil {
+		t.Fatal("tmdb.rsc accepted while tmdb disabled")
+	}
+	if err := g.checkOutputs(fullSet(), true); err == nil {
+		t.Fatal("missing tmdb.rsc accepted while tmdb enabled")
+	}
+
+	// 重复路径不改集合判定（与旧计数校验一致），仍由重复路径检查拒绝
+	dup := append(fullSet(), fileEntry{path: "rules/r.txt", content: []byte("y")})
+	if err := g.checkOutputs(dup, false); err == nil || !strings.Contains(err.Error(), "duplicate output path") {
+		t.Fatalf("duplicate output path not rejected: %v", err)
+	}
+}

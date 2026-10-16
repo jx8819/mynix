@@ -29,26 +29,15 @@ const (
 	perReqTimeout    = 90 * time.Second
 )
 
-// getMaxBodyBytes returns a sensible size limit per resource type
+// getMaxBodyBytes 返回单个资源的下载体积上限：名字含 direct_txt 的大列表（direct.txt 约 3MB）放宽到 10MiB，其余 5MiB。
+// 注意 key 是 -sources 里的源名（生产含 rule_direct_txt），此分支可达，勿按死代码处理。
 func getMaxBodyBytes(key string) int64 {
 	switch {
 	case strings.Contains(key, "direct_txt"):
-		return 10 * 1024 * 1024 // direct.txt is ~3MB
+		return 10 * 1024 * 1024 // direct.txt 类大列表
 	default:
-		return 5 * 1024 * 1024 // all text/yaml lists are well under 2MB
+		return 5 * 1024 * 1024 // 其余文本/YAML 列表远小于 2MB
 	}
-}
-
-// sanitizeError strips raw URL details from *url.Error to prevent token/credential leakage in logs and errors.
-func sanitizeError(err error, safeURL string) error {
-	if err == nil {
-		return nil
-	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
-		return fmt.Errorf("%s %s: %w", urlErr.Op, safeURL, urlErr.Err)
-	}
-	return err
 }
 
 // Fetcher handles concurrent HTTP GET requests with retries, timeout, and bounds.
@@ -199,8 +188,7 @@ var (
 	reAiPayloadRule = regexp.MustCompile(`^  - (DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|IP-CIDR),`)
 )
 
-// splitRawLines safely splits an in-memory byte slice into lines without line-length limits.
-// It trims a trailing newline so that files ending with a newline do not produce an extra empty element.
+// splitRawLines 按行切分内存内容（无行长限制），剥掉行尾 \r 与末尾换行，避免多出空元素。
 func splitRawLines(raw []byte) []string {
 	if len(raw) == 0 {
 		return nil
@@ -218,8 +206,9 @@ func splitRawLines(raw []byte) []string {
 	return lines
 }
 
+// parseGfwList 解码 base64 的 GFW-list 并过滤出可用域名：去注释、黑名单站点、纯 IP 与非法行，结果去重排序。
 func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
-	// Clean up base64 text (strip spaces, newlines)
+	// 清理 base64 文本（去空白与换行）
 	cleaned := bytes.Map(func(r rune) rune {
 		if r == '\r' || r == '\n' || r == ' ' || r == '\t' {
 			return -1
@@ -236,7 +225,7 @@ func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
 
 	rawLines := splitRawLines(decoded)
 	totalRaw := len(rawLines)
-	var lines []string
+	lines := make([]string, 0, len(rawLines))
 	droppedEmptyComment := 0
 	droppedBlacklist := 0
 	droppedIPv4 := 0
@@ -250,8 +239,7 @@ func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
 			continue
 		}
 
-		// sed 's#!.\+##; s#|##g; s#@##g; s#http:\/\/##; s#https:\/\/##;'
-		// Note: sed 's#!.\+##' removes '!' and everything after if '!' is followed by 1+ chars.
+		// 剥离装饰字符：'!' 后有内容则截断注释段，再去掉 |、@ 与协议前缀
 		if idx := strings.Index(line, "!"); idx >= 0 {
 			if idx+1 < len(line) {
 				line = line[:idx]
@@ -261,7 +249,7 @@ func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
 		line = strings.ReplaceAll(line, "@", "")
 		line = reScheme.ReplaceAllString(line, "")
 
-		// sed '/apple\.com/d; /sina\.cn/d; /sina\.com\.cn/d; /baidu\.com/d; /qq\.com/d'
+		// 剔除国内常见站点（apple/sina/baidu/qq）
 		if strings.Contains(line, "apple.com") ||
 			strings.Contains(line, "sina.cn") ||
 			strings.Contains(line, "sina.com.cn") ||
@@ -271,25 +259,25 @@ func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
 			continue
 		}
 
-		// sed '/^[0-9]\+\.[0-9]\+\.[0-9]\+\.[0-9]\+$/d'
+		// 剔除纯 IPv4 行
 		if reIPv4.MatchString(line) {
 			droppedIPv4++
 			continue
 		}
 
-		// grep '^[0-9a-zA-Z\.-]\+$'
+		// 仅保留域名合法字符（字母数字 . -）
 		if !reValidDomain.MatchString(line) {
 			droppedInvalid++
 			continue
 		}
 
-		// grep '\.'
+		// 域名必须含点
 		if !strings.Contains(line, ".") {
 			droppedNoDot++
 			continue
 		}
 
-		// sed 's#^\.\+##'
+		// 去掉前导点
 		line = strings.TrimLeft(line, ".")
 		if line == "" {
 			droppedEmptyComment++
@@ -310,8 +298,7 @@ func parseGfwList(name string, rawBase64 []byte, debug bool) ([]string, error) {
 	return res, nil
 }
 
-// parseFancyssRules processes temp_gfwlist2:
-// sed 's/ipset=\/\.//g; s/\/gfwlist//g; /^server/d'
+// parseFancyssRules 解析 fancyss dnsmasq 格式：丢弃 server 行，剥掉 ipset=/. 与 /gfwlist 包裹。
 func parseFancyssRules(name string, raw []byte, debug bool) []string {
 	rawLines := splitRawLines(raw)
 	totalRaw := len(rawLines)
@@ -347,7 +334,7 @@ func parseFancyssRules(name string, raw []byte, debug bool) []string {
 	return lines
 }
 
-// parsePlainList processes temp_gfwlist3 (raw lines)
+// parsePlainList 解析纯文本行列表：去首尾空白，丢空行。
 func parsePlainList(name string, raw []byte, debug bool) []string {
 	rawLines := splitRawLines(raw)
 	totalRaw := len(rawLines)
@@ -369,8 +356,7 @@ func parsePlainList(name string, raw []byte, debug bool) []string {
 	return lines
 }
 
-// parseMicrosoftList processes temp_gfwlist4:
-// grep 'DOMAIN-SUFFIX,' | sed 's/DOMAIN-SUFFIX,//'
+// parseMicrosoftList 从 Clash 规则文本提取 DOMAIN-SUFFIX 的域名，其余行丢弃。
 func parseMicrosoftList(name string, raw []byte, debug bool) []string {
 	rawLines := splitRawLines(raw)
 	totalRaw := len(rawLines)
@@ -400,8 +386,7 @@ func parseMicrosoftList(name string, raw []byte, debug bool) []string {
 	return lines
 }
 
-// parseCleanAiDomains processes the 10 clash-ai-rules yaml files:
-// grep -E '^  - DOMAIN(-SUFFIX)?,' | sed -E 's/^  - DOMAIN(-SUFFIX)?,//' | sort -u
+// parseCleanAiDomains 从全部 AI 源 YAML 提取 DOMAIN/DOMAIN-SUFFIX 条目，去重排序。
 func parseCleanAiDomains(name string, files [][]byte, debug bool) []string {
 	var domains []string
 	totalRaw := 0
@@ -435,9 +420,7 @@ func parseCleanAiDomains(name string, files [][]byte, debug bool) []string {
 	return res
 }
 
-// buildAiYaml processes the 10 clash-ai-rules yaml files for ai.yaml:
-// echo "payload:"
-// grep -E '^  - (DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|IP-CIDR),' | sort -u
+// buildAiYaml 汇总全部 AI 源的 payload 规则行生成 ai.yaml，去重排序。
 func buildAiYaml(files [][]byte) []byte {
 	var rules []string
 	for _, f := range files {
@@ -459,9 +442,7 @@ func buildAiYaml(files [][]byte) []byte {
 	return buf.Bytes()
 }
 
-// buildGoogleRulesYaml processes LM-Firefly Google.list:
-// echo "payload:"
-// awk '!/^PROCESS-NAME/ && !/^##/ && !/^$/ {print "  - "$0}' | sort -u
+// buildGoogleRulesYaml 将 Google 列表转为 payload 条目（丢弃 ## 注释与 PROCESS-NAME 行），去重排序。
 func buildGoogleRulesYaml(raw []byte) []byte {
 	var rules []string
 	for _, rawLine := range splitRawLines(raw) {
@@ -482,11 +463,8 @@ func buildGoogleRulesYaml(raw []byte) []byte {
 	return buf.Bytes()
 }
 
-// filterYamlNonAscii replicates filter-rules.sh:
-// Drop any rule line (a payload entry, i.e. a line starting with optional
-// whitespace then "- ") that contains a non-ASCII character (> 127).
-// Comments and other lines keep non-ASCII.
-// If no non-ASCII rule lines are dropped, the original raw bytes are returned unmodified.
+// filterYamlNonAscii 去掉 YAML payload 条目行（"- " 开头）中的非 ASCII 行；
+// 注释等其他行保留原样，无删除时原样返回原始字节。
 func filterYamlNonAscii(filename string, raw []byte, debug bool) []byte {
 	if len(raw) == 0 {
 		if debug {
@@ -528,7 +506,7 @@ func filterYamlNonAscii(filename string, raw []byte, debug bool) []byte {
 
 func asciiToLower(s string) string {
 	hasUpper := false
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			hasUpper = true
@@ -539,7 +517,7 @@ func asciiToLower(s string) string {
 		return s
 	}
 	b := make([]byte, len(s))
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if c >= 'A' && c <= 'Z' {
 			b[i] = c + 32
@@ -566,14 +544,8 @@ func sortUniqStrings(s []string) []string {
 	return res
 }
 
-// sortUfSedUniqU replicates:
-// sort -uf | sed 's/^\.*//g' | uniq -u
-//
-// In GNU sort -f (ignore-case) -u (unique keys):
-// It sorts elements based on case-folded comparison. When keys fold identically, sort -u keeps
-// the first occurrence.
-// Then sed 's/^\.*//g' trims leading dots.
-// Then uniq -u prints ONLY lines that appear exactly once consecutively.
+// sortUfSedUniqU 旧管线等价变换：忽略大小写排序去重（保留首个原形）→ 剥前导点 →
+// 仅保留变换后恰好出现一次的项（按连续分组判定）。
 func sortUfSedUniqU(lines []string) []string {
 	if len(lines) == 0 {
 		return nil
@@ -595,25 +567,25 @@ func sortUfSedUniqU(lines []string) []string {
 		}
 	}
 
-	// Step 1: Stable sort by lower-case representation (case-insensitive sort)
+	// 第一步：按小写形态稳定排序（忽略大小写）
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].lower < items[j].lower
 	})
 
-	// Step 2: sort -u: keep first occurrence of each unique case-folded key
-	var uniqueCaseFolded []string
-	for i := 0; i < len(items); i++ {
+	// 第二步：大小写折叠去重，保留首个原形
+	uniqueCaseFolded := make([]string, 0, len(items))
+	for i := range items {
 		if i == 0 || items[i].lower != items[i-1].lower {
 			uniqueCaseFolded = append(uniqueCaseFolded, items[i].orig)
 		}
 	}
 
-	// Step 3: sed 's/^\.*//g' -> strip leading dots
+	// 第三步：剥掉前导点
 	for i, s := range uniqueCaseFolded {
 		uniqueCaseFolded[i] = strings.TrimLeft(s, ".")
 	}
 
-	// Step 4: uniq -u -> only lines that appear exactly once consecutively
+	// 第四步：仅保留恰好出现一次的项（按连续分组判定）
 	var result []string
 	n := len(uniqueCaseFolded)
 	for i := 0; i < n; {
@@ -630,12 +602,8 @@ func sortUfSedUniqU(lines []string) []string {
 	return result
 }
 
-// differenceWithDirect replicates:
-// sort -f list.txt direct.txt direct.txt | uniq -u > output/clean-list.txt
-//
-// Any item present in direct.txt (case-insensitive) appears at least twice in the input,
-// so uniq -u filters it out. It outputs lines in list.txt that do not appear in direct.txt,
-// sorted case-insensitively with duplicates removed.
+// differenceWithDirect 从 list 中剔除 direct 白名单（忽略大小写），按忽略大小写字节序
+// 排序去重后，仅保留恰好出现一次的项。
 func differenceWithDirect(list []string, direct []string) []string {
 	directSet := make(map[string]struct{}, len(direct))
 	for _, d := range direct {
@@ -649,7 +617,7 @@ func differenceWithDirect(list []string, direct []string) []string {
 		orig  string
 		lower string
 	}
-	var filtered []elem
+	filtered := make([]elem, 0, len(list))
 	for _, l := range list {
 		trimmed := strings.TrimSpace(l)
 		if trimmed == "" {
@@ -683,31 +651,36 @@ func differenceWithDirect(list []string, direct []string) []string {
 	return result
 }
 
-// parsedSource holds one parsed GFW-list source together with its name for logging.
+// parsedSource 保存单个已解析的 GFW 域名源（含源名供日志使用）。
 type parsedSource struct {
 	name  string
 	lines []string
 }
 
-// generateCleanList aggregates and calculates clean-list domains.
+// generateCleanList 汇总各源与自定义列表，忽略大小写去重排序后扣除 direct 白名单，生成 clean-list。
 func generateCleanList(sources []parsedSource, cleanAi, myProxy, cleanIp, direct []string, debug bool) []string {
-	var combined []string
 	rawTotal := 0
-	var sourceCounts []string
+	for _, s := range sources {
+		rawTotal += len(s.lines)
+	}
+	rawTotal += len(cleanAi)
+
+	combined := make([]string, 0, rawTotal+len(myProxy)+len(cleanIp))
 	for _, s := range sources {
 		combined = append(combined, s.lines...)
-		rawTotal += len(s.lines)
-		sourceCounts = append(sourceCounts, fmt.Sprintf("%s=%d", s.name, len(s.lines)))
 	}
 	combined = append(combined, myProxy...)
 	combined = append(combined, cleanIp...)
 	combined = append(combined, cleanAi...)
 
-	rawTotal += len(cleanAi)
 	listTxt := sortUfSedUniqU(combined)
 	cleanList := differenceWithDirect(listTxt, direct)
 
 	if debug {
+		var sourceCounts []string
+		for _, s := range sources {
+			sourceCounts = append(sourceCounts, fmt.Sprintf("%s=%d", s.name, len(s.lines)))
+		}
 		log.Printf("[DEBUG] clean-list: %d raw domains, -%d direct whitelist, +%d custom proxy, +%d clean-ip -> %d unique domains",
 			rawTotal, len(direct), len(myProxy), len(cleanIp), len(cleanList))
 		log.Printf("[DEBUG] [AGGREGATE] raw_upstream=%d (%s, clean_ai=%d), custom_proxy=%d, clean_ip=%d, dedup_output=%d, direct_whitelist=%d, direct_subtracted=%d, final_clean_list=%d",
@@ -731,13 +704,8 @@ func generateDomainRsc(domains []string, debug bool) []byte {
 	return res
 }
 
-// generateDnsmasqForward renders dnsmasq per-domain forwarding lines:
-//
-//	server=/domain/target#port
-//
-// This is the dnsmasq counterpart of domain.rsc's RouterOS FWD entries, for
-// sites running dnsmasq (e.g. OpenWrt) instead of RouterOS. Each configured
-// upstream renders the same clean domain list into its own output file.
+// generateDnsmasqForward 生成 dnsmasq 按域名转发行（server=/域名/上游#端口），
+// 是 domain.rsc 的 dnsmasq 对应物，供 OpenWrt 等 dnsmasq 站点使用；每个上游一份输出文件。
 func generateDnsmasqForward(domains []string, target string, port int, debug bool) []byte {
 	var buf bytes.Buffer
 	fmt.Fprintf(&buf, "# generated by ros-rules-generator - do not edit\n")
@@ -752,17 +720,14 @@ func generateDnsmasqForward(domains []string, target string, port int, debug boo
 	return res
 }
 
-// telegramCidrURL is Telegram's official public CIDR list (IPv4 + IPv6), the same
-// source the RouterOS telegram-address-list-update script consumes.
+// telegramCidrURL 是 Telegram 官方公开 CIDR 列表（IPv4+IPv6），与 RouterOS telegram 地址列表更新脚本同源。
 const telegramCidrURL = "https://core.telegram.org/resources/cidr.txt"
 
-// telegramFetchKey is the reserved slot in the concurrent fetch map. The leading
-// underscores keep it from colliding with user-configured source names.
+// telegramFetchKey 是并发拉取表里的保留键，前导下划线避免与用户配置的源名冲突。
 const telegramFetchKey = "__telegram_cidr__"
 
-// parseTelegramCidrs splits the official cidr.txt into IPv4 and IPv6 CIDR lines.
-// Blank lines and #-comments are dropped. No port/protocol special-casing: only
-// the plain address ranges are needed (Telegram voice/UDP handling is out of scope).
+// parseTelegramCidrs 把官方 cidr.txt 拆成 IPv4 / IPv6 两组，丢空行与 # 注释；
+// 只取地址段，不做端口/协议特判（Telegram 语音/UDP 处理不在范围内）。
 func parseTelegramCidrs(raw []byte, debug bool) (v4, v6 []string) {
 	for _, line := range splitRawLines(raw) {
 		line = strings.TrimSpace(line)
@@ -781,14 +746,16 @@ func parseTelegramCidrs(raw []byte, debug bool) (v4, v6 []string) {
 	return v4, v6
 }
 
-// generateTelegramRsc renders a RouterOS address-list import for the telegram list.
-// Entries carry comment=telegram-official-managed so entries manually tagged
-// telegram-manual-* survive the swap, matching the live RouterOS script's contract.
+// generateTelegramRsc 生成 RouterOS telegram 地址列表导入：条目带 comment=telegram-official-managed，
+// 换代时只清理托管条目，手工标记 telegram-manual-* 的条目得以保留。
 func generateTelegramRsc(v4, v6 []string, debug bool) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("/ip firewall address-list remove [find where list=telegram comment=telegram-official-managed]\n")
 	buf.WriteString("/ip firewall address-list\n")
-	for _, cidr := range append(append([]string{}, v4...), v6...) {
+	for _, cidr := range v4 {
+		fmt.Fprintf(&buf, "add list=telegram address=%s comment=telegram-official-managed\n", cidr)
+	}
+	for _, cidr := range v6 {
 		fmt.Fprintf(&buf, "add list=telegram address=%s comment=telegram-official-managed\n", cidr)
 	}
 	res := buf.Bytes()
@@ -798,8 +765,7 @@ func generateTelegramRsc(v4, v6 []string, debug bool) []byte {
 	return res
 }
 
-// generateTelegramMihomo renders a mihomo rule-provider payload for the telegram
-// address ranges (the dnsmasq/mihomo counterpart of telegram.rsc).
+// generateTelegramMihomo 生成 telegram 地址段的 mihomo rule-provider payload（telegram.rsc 的对应物）。
 func generateTelegramMihomo(v4, v6 []string, debug bool) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("payload:\n")
@@ -834,21 +800,14 @@ func generateClashGfwList(domains []string, debug bool) []byte {
 }
 
 // ----------------------------------------------------------------------------
-// TMDB DNS mapping（思路源自 myzhongqiang/DNS-TMDB；解析通道换大厂 DoH 并加硬校验）
-//
-// 第一性原理（2026-09-29 实测）：TMDB 在国内可直连——www.themoviedb.org 走真实
-// CloudFront IP 直连 200；坏的是 DNS：国内公共 DNS 对 api.themoviedb.org 给出不可达
-// 假答案（199.96.62.41，直连 12s 超时）。所以不需要代理，只需要「正确 IP 直连」。
-//
-// 管线：大厂 DoH（Google / Cloudflare，HTTPS 加密；弃用原版无名第三方 ip33 API）
-// + ECS 提示国内网段（让 CDN 返回国内最优边缘）→ 候选 IP 逐一 TLS SNI 握手、按证书
-// SAN 证明「该 IP 真的在服务该域名」（比原版 ICMP ping 过滤强）→ 生成 tmdb.rsc
-// （RouterOS /ip dns static 映射，路由器每日 05:00 拉取）。
+// TMDB DNS 映射（思路源自 myzhongqiang/DNS-TMDB，解析通道换大厂 DoH 并加硬校验）
+// 管线：大厂 DoH 取真实 A 记录（ECS 提示仅影响 CDN 选边）→ 候选 IP 逐一 TLS SNI 握手、
+// 按证书 SAN 证明「该 IP 在服务该域名」→ 生成 tmdb.rsc 供 RouterOS 静态映射。
 // ----------------------------------------------------------------------------
 
 const (
-	defaultTmdbECS = "115.192.0.0/11" // ECS 提示：浙江电信（家宽归属），只影响 CDN 选边
-	tmdbMaxIPs     = 4                // 每域名最多保留的已验证 IP
+	defaultTmdbECS = "" // 默认不带 ECS 提示（空 = 关闭）；生产由模块显式传 -tmdb-edns-subnet
+	tmdbMaxIPs     = 4  // 每域名最多保留的已验证 IP
 	tmdbVerifyTO   = 5 * time.Second
 	tmdbDohTO      = 15 * time.Second
 )
@@ -864,7 +823,7 @@ var dohEndpoints = []dohEndpoint{
 // tmdbVerifyPort 供测试替换（生产恒为 443）。
 var tmdbVerifyPort = "443"
 
-// dohQueryA asks one DoH JSON endpoint for the A records of domain.
+// dohQueryA 向单个 DoH JSON 端点查询域名的 A 记录（可附 ECS 提示）。
 func dohQueryA(ctx context.Context, endpoint, accept, domain, ecs string) ([]string, error) {
 	q := endpoint + "?name=" + url.QueryEscape(domain) + "&type=A"
 	if ecs != "" {
@@ -890,7 +849,7 @@ func dohQueryA(ctx context.Context, endpoint, accept, domain, ecs string) ([]str
 	return parseDoHAnswers(domain, raw)
 }
 
-// parseDoHAnswers extracts IPv4 A records from a DoH JSON response (Google/Cloudflare schema).
+// parseDoHAnswers 从 DoH JSON 响应提取 IPv4 A 记录（Google/Cloudflare 共同 schema）。
 func parseDoHAnswers(domain string, raw []byte) ([]string, error) {
 	var payload struct {
 		Status int `json:"Status"`
@@ -919,8 +878,7 @@ func parseDoHAnswers(domain string, raw []byte) ([]string, error) {
 	return ips, nil
 }
 
-// verifyTmdbIP runs a TLS handshake to ip:tmdbVerifyPort with SNI=domain and checks the
-// presented leaf certificate is valid for domain. Proves the IP really serves the domain.
+// verifyTmdbIP 以 SNI=domain 对 ip:443 做 TLS 握手并校验证书 SAN，证明该 IP 真的在服务该域名。
 func verifyTmdbIP(ctx context.Context, ip, domain string) error {
 	dialer := &tls.Dialer{
 		NetDialer: &net.Dialer{Timeout: tmdbVerifyTO},
@@ -944,10 +902,8 @@ func verifyTmdbIP(ctx context.Context, ip, domain string) error {
 	return state.PeerCertificates[0].VerifyHostname(domain)
 }
 
-// resolveTmdb resolves every configured domain via all DoH endpoints and keeps only IPs
-// passing the TLS SNI check. A domain with zero verified IPs fails the whole run: a silent
-// gap would reintroduce the broken-DNS symptom, and the atomic deploy contract keeps the
-// previous lists live on failure.
+// resolveTmdb 经全部 DoH 端点解析每个域名，仅保留通过 TLS SNI 校验的 IP。
+// 任一域名零验证 IP 即整轮失败：静默缺口会复发 DNS 污染症状，原子部署契约保住旧列表在线。
 func (g *Generator) resolveTmdb(ctx context.Context) (map[string][]string, error) {
 	verified := make(map[string][]string, len(g.tmdbDomains))
 	for _, domain := range sortUniqStrings(g.tmdbDomains) {
@@ -1001,7 +957,7 @@ func (g *Generator) resolveTmdb(ctx context.Context) (map[string][]string, error
 	return verified, nil
 }
 
-// generateTmdbRsc renders RouterOS DNS static A mappings, replaceable via comment=tmdb.
+// generateTmdbRsc 生成 RouterOS DNS 静态 A 映射（comment=tmdb，重复导入可整体替换）。
 func generateTmdbRsc(verified map[string][]string, debug bool) []byte {
 	var buf bytes.Buffer
 	buf.WriteString("/ip dns static remove numbers=[/ip dns static find comment=tmdb]\n")
@@ -1029,27 +985,27 @@ func generateTmdbRsc(verified map[string][]string, debug bool) []byte {
 // Download Sources
 // ----------------------------------------------------------------------------
 
-// GfwlistSource is one upstream GFW-list source and the parser applied to it.
+// GfwlistSource 是一个 GFW-list 上游源及其解析格式（format 决定用哪个解析器）。
 type GfwlistSource struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
 	Format string `json:"format"` // gfwlist | fancyss | plain | microsoft
 }
 
-// Source is a named upstream URL (ai and google groups).
+// Source 是一个命名上游 URL（ai / google 组）。
 type Source struct {
 	Name string `json:"name"`
 	URL  string `json:"url"`
 }
 
-// RuleSource is an upstream file copied verbatim to Output (relative to outDir).
+// RuleSource 是按原样透传到 Output（相对 outDir）的上游文件。
 type RuleSource struct {
 	Name   string `json:"name"`
 	URL    string `json:"url"`
 	Output string `json:"output"`
 }
 
-// Sources is the -sources JSON schema:
+// Sources 是 -sources JSON 结构：
 // {"gfwlist":[{"name","url","format"}],"ai":[{"name","url"}],"google":[{"name","url"}],"rules":[{"name","url","output"}]}
 type Sources struct {
 	Gfwlist []GfwlistSource `json:"gfwlist"`
@@ -1058,8 +1014,8 @@ type Sources struct {
 	Rules   []RuleSource    `json:"rules"`
 }
 
-// DnsmasqForward is one named variant of the -dnsmasq-forwards-file JSON array.
-// "default" retains the historical domain.dnsmasq.conf URL.
+// DnsmasqForward 是 -dnsmasq-forwards-file JSON 数组里的一条命名上游；
+// name=default 沿用 domain.dnsmasq.conf 文件名。
 type DnsmasqForward struct {
 	Name   string `json:"name"`
 	Target string `json:"target"`
@@ -1142,9 +1098,8 @@ var validGfwlistFormats = map[string]bool{
 	"microsoft": true,
 }
 
-// defaultSources returns the empty built-in fallback used when -sources is omitted.
-// All upstream URLs are private deployment config; pass them via -sources JSON (see the NixOS module).
-// Defaults are intentionally empty.
+// defaultSources 返回 -sources 缺省时的空内置源。上游 URL 属部署私有配置，
+// 由 NixOS 模块经 -sources JSON 传入，故默认刻意留空。
 func defaultSources() Sources {
 	return Sources{
 		Gfwlist: []GfwlistSource{},
@@ -1163,7 +1118,7 @@ func hasDotDotSegment(p string) bool {
 	return false
 }
 
-// validate rejects duplicate source names and rule outputs escaping the output directory.
+// validate 拒绝重名源与逃逸输出目录的 rule output。
 func (s Sources) validate() error {
 	seen := make(map[string]bool)
 	checkName := func(name string) error {
@@ -1202,7 +1157,7 @@ func (s Sources) validate() error {
 	return nil
 }
 
-// loadSources reads the -sources JSON file; an empty path selects the built-in defaults.
+// loadSources 读取 -sources JSON 文件；空路径选择空内置默认。
 func loadSources(path string) (Sources, error) {
 	if path == "" {
 		return defaultSources(), nil
@@ -1294,10 +1249,28 @@ func NewGenerator(outDir, tempParent string, direct, myProxy, cleanIp, tmdbDomai
 	}, nil
 }
 
-func (g *Generator) Run(ctx context.Context) error {
-	log.Printf("Starting ros-rules generation -> target: %s", g.outDir)
+// fileEntry 是一个待写出的产物文件，path 相对 staging 根目录。
+type fileEntry struct {
+	path    string // 相对 staging 根
+	content []byte
+	isYaml  bool
+}
 
-	// Step 1: Concurrently fetch all upstream resources
+// baseOutputPaths 是固定产物文件名清单（不含 dnsmasq 变体、规则透传与可选 TMDB 映射）。
+var baseOutputPaths = []string{
+	"clean-list.txt",
+	"domain.rsc",
+	"telegram.rsc",
+	"telegram-mihomo.yaml",
+	"clash-gfw-list.txt",
+	"rules/clean-ip.txt",
+	"rules/ai.yaml",
+	"rules/google_rules.yaml",
+}
+
+// fetchUpstream 并发拉取全部上游资源（各源 + Telegram 官方 CIDR）；
+// 任一失败即聚合报错并中止，避免半套产物上线。
+func (g *Generator) fetchUpstream(ctx context.Context) (map[string][]byte, error) {
 	urls := make(map[string]string,
 		len(g.sources.Gfwlist)+len(g.sources.AI)+len(g.sources.Google)+len(g.sources.Rules))
 	for _, s := range g.sources.Gfwlist {
@@ -1343,7 +1316,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		errs = append(errs, err.Error())
 	}
 	if len(errs) > 0 {
-		return fmt.Errorf("failed fetching %d upstream resources:\n  %s", len(errs), strings.Join(errs, "\n  "))
+		return nil, fmt.Errorf("failed fetching %d upstream resources:\n  %s", len(errs), strings.Join(errs, "\n  "))
 	}
 
 	log.Printf("Successfully fetched all %d upstream resources. Generating rules...", len(urls))
@@ -1354,8 +1327,12 @@ func (g *Generator) Run(ctx context.Context) error {
 		}
 		log.Printf("[DEBUG] [HTTP] fetch complete: %d resources, %d total bytes", len(fetched), totalBytes)
 	}
+	return fetched, nil
+}
 
-	// Step 2: Transform GFW list sources (dynamic; parser dispatched by format)
+// buildCleanList 解析全部 GFW 域名源（按 format 分派解析器）与 AI 源，汇总生成 clean-list；
+// 返回 clean-list 与 AI 源原始内容（ai.yaml 复用，避免二次解析）。
+func (g *Generator) buildCleanList(fetched map[string][]byte) ([]string, [][]byte, error) {
 	gfwLists := make([]parsedSource, 0, len(g.sources.Gfwlist))
 	for _, s := range g.sources.Gfwlist {
 		var lines []string
@@ -1363,7 +1340,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		case "gfwlist":
 			parsed, err := parseGfwList(s.Name, fetched[s.Name], g.debug)
 			if err != nil {
-				return fmt.Errorf("parse %s: %w", s.Name, err)
+				return nil, nil, fmt.Errorf("parse %s: %w", s.Name, err)
 			}
 			lines = parsed
 		case "fancyss":
@@ -1373,7 +1350,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		case "microsoft":
 			lines = parseMicrosoftList(s.Name, fetched[s.Name], g.debug)
 		default:
-			return fmt.Errorf("source %s: unknown format %q (want gfwlist|fancyss|plain|microsoft)", s.Name, s.Format)
+			return nil, nil, fmt.Errorf("source %s: unknown format %q (want gfwlist|fancyss|plain|microsoft)", s.Name, s.Format)
 		}
 		gfwLists = append(gfwLists, parsedSource{name: s.Name, lines: lines})
 	}
@@ -1387,7 +1364,24 @@ func (g *Generator) Run(ctx context.Context) error {
 	cleanList := generateCleanList(gfwLists, cleanAi, g.myProxy, g.cleanIp, g.direct, g.debug)
 
 	log.Printf("Generated clean-list: %d entries", len(cleanList))
+	return cleanList, aiFiles, nil
+}
 
+// renderTmdbRsc 渲染 TMDB DNS 静态映射（tmdbDomains 为空则关闭并返回 nil）。
+func (g *Generator) renderTmdbRsc(ctx context.Context) ([]byte, error) {
+	if len(g.tmdbDomains) == 0 {
+		return nil, nil
+	}
+	verified, err := g.resolveTmdb(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tmdb dns mapping: %w", err)
+	}
+	return generateTmdbRsc(verified, g.debug), nil
+}
+
+// assembleFiles 装配全部产物清单：clean-list/domain/clash 清单、dnsmasq 变体、
+// Telegram 双格式、TMDB 映射与规则透传文件。
+func (g *Generator) assembleFiles(ctx context.Context, fetched map[string][]byte, cleanList []string, aiFiles [][]byte) ([]fileEntry, error) {
 	domainRscData := generateDomainRsc(cleanList, g.debug)
 	clashGfwData := generateClashGfwList(cleanList, g.debug)
 	cleanIpData := generateClashDomainList(sortUfSedUniqU(g.cleanIp), "rules/clean-ip.txt", g.debug)
@@ -1398,35 +1392,24 @@ func (g *Generator) Run(ctx context.Context) error {
 		cleanListBuf.WriteString("\n")
 	}
 
-	// Generate rules/ai.yaml
+	// 生成 rules/ai.yaml
 	aiYaml := buildAiYaml(aiFiles)
 
-	// Generate rules/google_rules.yaml (one payload section per configured google source)
+	// 生成 rules/google_rules.yaml（每个 google 源一个 payload 段）
 	var googleRulesYaml []byte
 	for _, s := range g.sources.Google {
 		googleRulesYaml = append(googleRulesYaml, buildGoogleRulesYaml(fetched[s.Name])...)
 	}
 
-	// Step 2.5: TMDB DNS 映射（可选；tmdbDomains 非空时启用，失败即中止整轮生成）
-	var tmdbRsc []byte
-	if len(g.tmdbDomains) > 0 {
-		verified, err := g.resolveTmdb(ctx)
-		if err != nil {
-			return fmt.Errorf("tmdb dns mapping: %w", err)
-		}
-		tmdbRsc = generateTmdbRsc(verified, g.debug)
+	// TMDB DNS 映射（可选；失败即中止整轮生成）
+	tmdbRsc, err := g.renderTmdbRsc(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	// Prepare map of all output files
-	// Top-level: clean-list.txt, domain.rsc, clash-gfw-list.txt
-	// rules/: ai.yaml, google_rules.yaml + one passthrough file per configured rule source
-	type fileEntry struct {
-		path    string // relative to staging root
-		content []byte
-		isYaml  bool
-	}
-
-	var filesToWrite []fileEntry
+	// 装配产物清单：顶层 clean-list.txt、domain.rsc、clash-gfw-list.txt 等；
+	// rules/ 下 ai.yaml、google_rules.yaml 与每个规则透传源一个文件
+	filesToWrite := make([]fileEntry, 0, len(baseOutputPaths)+len(g.dnsmasqForwards)+len(g.sources.Rules)+1)
 
 	filesToWrite = append(filesToWrite, fileEntry{path: "clean-list.txt", content: cleanListBuf.Bytes()})
 	filesToWrite = append(filesToWrite, fileEntry{path: "domain.rsc", content: domainRscData})
@@ -1443,26 +1426,59 @@ func (g *Generator) Run(ctx context.Context) error {
 		filesToWrite = append(filesToWrite, fileEntry{path: "tmdb.rsc", content: tmdbRsc})
 	}
 
-	// rules/ files
+	// rules/ 产物
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/clean-ip.txt", content: cleanIpData, isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/ai.yaml", content: aiYaml, isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/google_rules.yaml", content: googleRulesYaml, isYaml: true})
 
-	// Passthrough rule files at their configured output paths (yaml outputs get non-ASCII filtering)
+	// 规则透传文件写到配置的输出路径（.yaml 输出做非 ASCII 过滤）
 	for _, s := range g.sources.Rules {
 		filesToWrite = append(filesToWrite, fileEntry{path: s.Output, content: fetched[s.Name], isYaml: strings.HasSuffix(s.Output, ".yaml")})
 	}
 
-	// Base files plus optional TMDB mapping, configured rule sources and dnsmasq variants.
-	expectedFiles := 8 + len(g.sources.Rules) + len(g.dnsmasqForwards)
-	if tmdbRsc != nil {
-		expectedFiles++
+	return filesToWrite, nil
+}
+
+// checkOutputs 校验产物清单：先与期望文件名集合比对（集合比较替代魔法数计数），
+// 再拒绝非法路径、重复路径与文件/目录冲突；全部通过后才允许触碰 staging。
+func (g *Generator) checkOutputs(filesToWrite []fileEntry, tmdbEnabled bool) error {
+	expected := make(map[string]struct{}, len(baseOutputPaths)+len(g.dnsmasqForwards)+len(g.sources.Rules)+1)
+	for _, p := range baseOutputPaths {
+		expected[p] = struct{}{}
 	}
-	if len(filesToWrite) != expectedFiles {
-		return fmt.Errorf("internal inconsistency: expected %d files, got %d", expectedFiles, len(filesToWrite))
+	for _, f := range g.dnsmasqForwards {
+		expected[f.outputPath()] = struct{}{}
+	}
+	for _, s := range g.sources.Rules {
+		expected[s.Output] = struct{}{}
+	}
+	if tmdbEnabled {
+		expected["tmdb.rsc"] = struct{}{}
 	}
 
-	// Reject duplicate normalized paths and file/directory conflicts before touching staging.
+	actual := make(map[string]struct{}, len(filesToWrite))
+	for _, fe := range filesToWrite {
+		actual[fe.path] = struct{}{}
+	}
+	var missing, unexpected []string
+	for p := range expected {
+		if _, ok := actual[p]; !ok {
+			missing = append(missing, p)
+		}
+	}
+	for p := range actual {
+		if _, ok := expected[p]; !ok {
+			unexpected = append(unexpected, p)
+		}
+	}
+	if len(missing) > 0 || len(unexpected) > 0 {
+		sort.Strings(missing)
+		sort.Strings(unexpected)
+		return fmt.Errorf("internal inconsistency: output set mismatch (missing: %s, unexpected: %s)",
+			strings.Join(missing, ", "), strings.Join(unexpected, ", "))
+	}
+
+	// 触碰 staging 前先拒绝重复/非法/冲突路径
 	paths := make(map[string]bool, len(filesToWrite))
 	for _, fe := range filesToWrite {
 		path := filepath.Clean(fe.path)
@@ -1481,37 +1497,38 @@ func (g *Generator) Run(ctx context.Context) error {
 			}
 		}
 	}
+	return nil
+}
 
-	// Step 3: Write to staging directory atomically
+// prepareStaging 在 tempParent 下建 staging 目录（权限 0755 保证 web 服务可穿越）与 rules 子目录。
+func (g *Generator) prepareStaging() (string, error) {
 	if err := os.MkdirAll(g.tempParent, 0755); err != nil {
-		return fmt.Errorf("create temp parent %q: %w", g.tempParent, err)
+		return "", fmt.Errorf("create temp parent %q: %w", g.tempParent, err)
 	}
 
 	stagingDir, err := os.MkdirTemp(g.tempParent, ".lists-tmp-*")
 	if err != nil {
-		return fmt.Errorf("create staging dir in %q: %w", g.tempParent, err)
+		return "", fmt.Errorf("create staging dir in %q: %w", g.tempParent, err)
 	}
 	if g.debug {
 		log.Printf("[DEBUG] staging in %s", stagingDir)
 	}
 
-	// Ensure stagingDir permissions are 0755 so web server (caddy) can traverse it
 	if err := os.Chmod(stagingDir, 0755); err != nil {
 		_ = os.RemoveAll(stagingDir)
-		return fmt.Errorf("chmod staging dir %q: %w", stagingDir, err)
+		return "", fmt.Errorf("chmod staging dir %q: %w", stagingDir, err)
 	}
-	// Clean up staging on any failure
-	defer func() {
-		if stagingDir != "" {
-			_ = os.RemoveAll(stagingDir)
-		}
-	}()
 
 	rulesStagingDir := filepath.Join(stagingDir, "rules")
 	if err := os.MkdirAll(rulesStagingDir, 0755); err != nil {
-		return fmt.Errorf("create staging rules dir: %w", err)
+		_ = os.RemoveAll(stagingDir)
+		return "", fmt.Errorf("create staging rules dir: %w", err)
 	}
+	return stagingDir, nil
+}
 
+// writeOutputs 把产物写入 staging（yaml 产物做非 ASCII payload 过滤，文件统一 0644）。
+func (g *Generator) writeOutputs(stagingDir string, filesToWrite []fileEntry) error {
 	for _, fe := range filesToWrite {
 		content := fe.content
 		if fe.isYaml || strings.HasSuffix(fe.path, ".yaml") {
@@ -1519,7 +1536,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		}
 
 		fullPath := filepath.Join(stagingDir, fe.path)
-		// Mode 0644 for all served files
+		// 供 web 服务的文件统一 0644
 		if err := os.WriteFile(fullPath, content, 0644); err != nil {
 			return fmt.Errorf("write %s: %w", fe.path, err)
 		}
@@ -1528,8 +1545,11 @@ func (g *Generator) Run(ctx context.Context) error {
 			log.Printf("[DEBUG] [GENERATE] file=%s bytes=%d lines=%d is_yaml=%t", fe.path, len(content), lineCount, fe.isYaml)
 		}
 	}
+	return nil
+}
 
-	// Verify all output files exist and are non-empty
+// verifyOutputs 自校验：staging 中每个产物必须存在且非空，防止空文件换链上线。
+func (g *Generator) verifyOutputs(stagingDir string, filesToWrite []fileEntry) error {
 	for _, fe := range filesToWrite {
 		fullPath := filepath.Join(stagingDir, fe.path)
 		fi, err := os.Stat(fullPath)
@@ -1543,8 +1563,13 @@ func (g *Generator) Run(ctx context.Context) error {
 	if g.debug {
 		log.Printf("[DEBUG] verified all %d files present and non-empty in staging", len(filesToWrite))
 	}
+	return nil
+}
 
-	// Ensure destination directory parent exists
+// deployStaging 原子上线 staging：移入版本目录、软链一次换名覆盖 outDir，并清掉旧版本与残留。
+// 成功返回后 staging 由版本目录接管；失败时 staging 仍归调用方清理。
+func (g *Generator) deployStaging(stagingDir string, fileCount int) error {
+	// 确保目标父目录存在
 	targetParent := filepath.Dir(g.outDir)
 	if err := os.MkdirAll(targetParent, 0755); err != nil {
 		return fmt.Errorf("create target parent %q: %w", targetParent, err)
@@ -1559,7 +1584,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		return fmt.Errorf("lstat outDir %q: %w", g.outDir, err)
 	}
 
-	// Determine previous target for safe cleanup
+	// 已有软链时解析旧版本目标用于事后清理
 	var oldTarget string
 	if err == nil {
 		oldTarget, _ = os.Readlink(g.outDir)
@@ -1571,17 +1596,16 @@ func (g *Generator) Run(ctx context.Context) error {
 		}
 	}
 
-	// Move stagingDir to persistent versioned directory in targetParent
+	// staging 移入持久版本目录
 	versionDir := filepath.Join(targetParent, fmt.Sprintf(".lists-v.%d", time.Now().UnixNano()))
 	if err := os.Rename(stagingDir, versionDir); err != nil {
 		return fmt.Errorf("move staging to version dir %q: %w", versionDir, err)
 	}
-	stagingDir = "" // now managed under versionDir
 	if g.debug {
 		log.Printf("[DEBUG] moving to version %s", versionDir)
 	}
 
-	// Create temporary symlink pointing to versionDir (use relative name if both under same parent)
+	// 临时软链指向版本目录（同父目录下用相对目标）
 	relTarget, err := filepath.Rel(targetParent, versionDir)
 	if err != nil {
 		relTarget = versionDir
@@ -1593,7 +1617,7 @@ func (g *Generator) Run(ctx context.Context) error {
 		return fmt.Errorf("create temp symlink %q: %w", tempLink, err)
 	}
 
-	// Atomically rename symlink over g.outDir
+	// 软链原子改名覆盖 outDir（零停机换链）
 	swapTimestamp := time.Now().UTC().Format(time.RFC3339Nano)
 	if err := os.Rename(tempLink, g.outDir); err != nil {
 		_ = os.Remove(tempLink)
@@ -1605,11 +1629,19 @@ func (g *Generator) Run(ctx context.Context) error {
 		log.Printf("[DEBUG] [DEPLOY] atomic symlink swap completed at %s (target: %s)", swapTimestamp, relTarget)
 	}
 
-	// Clean up previous version target if it resides strictly under targetParent and starts with .lists-
+	g.cleanupVersions(targetParent, oldTarget, filepath.Base(versionDir))
+
+	log.Printf("Successfully generated and atomically deployed all %d rule files to %s", fileCount, g.outDir)
+	return nil
+}
+
+// cleanupVersions 清理上一软链指向的旧版本目录，以及 targetParent 下残留的
+// .lists-v.* / .lists-tmp.* 版本目录；keepBase 是本次保留的版本目录名。
+func (g *Generator) cleanupVersions(targetParent, oldTarget, keepBase string) {
 	if oldTarget != "" {
 		if rel, err := filepath.Rel(targetParent, oldTarget); err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
 			base := filepath.Base(oldTarget)
-			if strings.HasPrefix(base, ".lists-") && base != filepath.Base(versionDir) {
+			if strings.HasPrefix(base, ".lists-") && base != keepBase {
 				if fi, err := os.Lstat(oldTarget); err == nil && fi.IsDir() {
 					if err := os.RemoveAll(oldTarget); err != nil {
 						if g.debug {
@@ -1625,11 +1657,10 @@ func (g *Generator) Run(ctx context.Context) error {
 		}
 	}
 
-	// Clean up any stale leftover .lists-v.* or .lists-tmp.* versions in targetParent
 	entries, _ := os.ReadDir(targetParent)
 	for _, e := range entries {
 		name := e.Name()
-		if name == filepath.Base(versionDir) {
+		if name == keepBase {
 			continue
 		}
 		if strings.HasPrefix(name, ".lists-v.") || strings.HasPrefix(name, ".lists-tmp.") {
@@ -1647,13 +1678,58 @@ func (g *Generator) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
 
-	log.Printf("Successfully generated and atomically deployed all %d rule files to %s", len(filesToWrite), g.outDir)
+// Run 执行整条生成管线：拉取源 → 生成 clean-list → 装配产物（含 TMDB 映射）→ 产物校验
+// → 写出 staging → 自校验 → 原子上线。任一阶段失败即中止，旧列表保持在线。
+func (g *Generator) Run(ctx context.Context) error {
+	log.Printf("Starting ros-rules generation -> target: %s", g.outDir)
+
+	fetched, err := g.fetchUpstream(ctx)
+	if err != nil {
+		return err
+	}
+
+	cleanList, aiFiles, err := g.buildCleanList(fetched)
+	if err != nil {
+		return err
+	}
+
+	filesToWrite, err := g.assembleFiles(ctx, fetched, cleanList, aiFiles)
+	if err != nil {
+		return err
+	}
+
+	if err := g.checkOutputs(filesToWrite, len(g.tmdbDomains) > 0); err != nil {
+		return err
+	}
+
+	stagingDir, err := g.prepareStaging()
+	if err != nil {
+		return err
+	}
+	// 失败清理 staging；换链成功后置空，交由版本目录接管
+	defer func() {
+		if stagingDir != "" {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+
+	if err := g.writeOutputs(stagingDir, filesToWrite); err != nil {
+		return err
+	}
+	if err := g.verifyOutputs(stagingDir, filesToWrite); err != nil {
+		return err
+	}
+	if err := g.deployStaging(stagingDir, len(filesToWrite)); err != nil {
+		return err
+	}
+	stagingDir = ""
 	return nil
 }
 
 func main() {
-	outDir := flag.String("out", "/etc/nixos/services/caddy/web/lists", "Output directory for generated rule files")
+	outDir := flag.String("out", ".", "Output directory for generated rule files")
 	tempParent := flag.String("temp-parent", "", "Parent directory for staging temporary files (must be on same filesystem as out)")
 	timeout := flag.Duration("timeout", defaultTimeout, "Global pipeline execution timeout")
 	directDomains := flag.String("direct-domains", "", "Comma-separated list of direct domains")

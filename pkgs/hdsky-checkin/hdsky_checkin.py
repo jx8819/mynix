@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HDSky 自动签到。
 
-签到流程（站点三步，2024-04 抓包所得）：
+签到流程（站点三步）：
   1. POST /image_code_ajax.php  action=new            -> {success, code=imagehash}
   2. GET  /image.php?action=regimage&imagehash=<code>  -> 验证码图片
   3. POST /showup.php  action=showup&imagehash&imagestring -> 签到结果
@@ -9,13 +9,13 @@
      message="date_unmatch"     今日已签过（当成功处理）
 
 设计要点：
-  * Cookie 从文件读（sops-nix 渲染），以原始 Cookie 请求头发出去，与浏览器逐字节一致；
+  * Cookie 从文件读（部署方渲染），以原始 Cookie 请求头发出去，与浏览器逐字节一致；
     不走 requests 的 cookies dict，避免 %XX 被二次转义。
   * TLS 校验保持开启——cookie 就是登录凭据，不能为了省事关掉校验。
   * 验证码识别错就重取一张重试，有次数上限，绝不无限循环（cron 场景）。
   * 任何失败（cookie 失效 / 接口异常 / 验证码耗尽）都发一封告警邮件到本机 sendmail，
-    收件人由 --mail-to-file 指定（同样来自 sops）。不给该参数则不告警。
-  * 退出码：0 成功/今日已签，2 配置缺失，3 接口异常，4 重试耗尽。
+    收件人由 --mail-to-file 指定。不给该参数则不告警。
+  * 退出码：0 成功/今日已签，1 配置文件缺失或不可读，3 接口/OCR 异常，4 重试耗尽。
 """
 import argparse
 import logging
@@ -220,9 +220,7 @@ def main():
                 body=(
                     f"HDSky（{SITE}）自动签到失败。\n\n"
                     f"原因：{reason}\n"
-                    f"退出码：{code}\n\n"
-                    f"常见处理：Cookie 过期就从 Safari 重新取一份，"
-                    f"更新到 sops 的 secrets/hdsky_cookie 后重启服务。\n"
+                    f"退出码：{code}\n"
                 ),
                 sendmail_bin=args.sendmail,
             )

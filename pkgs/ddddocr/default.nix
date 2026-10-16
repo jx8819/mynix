@@ -1,8 +1,5 @@
-# ddddocr — 带带弟弟 OCR（ddddocr-1.6.1）
-#
-# nixpkgs 未收录，这里自打包。上游只发 wheel（内含几个 ONNX 模型，包体 ~76MB），
-# 依赖 numpy / onnxruntime / Pillow / opencv-python-headless，nixpkgs 都有。
-# HDSky 签到只用它的 classification()（纯字符识别），不碰 detect/矩形那套。
+# ddddocr — 带带弟弟 OCR（ONNX runtime 验证码识别），nixpkgs 未收录，自打包。
+# hdsky-checkin 的依赖（只用 classification() 纯字符识别，不碰 detect/矩形），也可单独用。
 { lib
 , buildPythonPackage
 , fetchurl
@@ -17,8 +14,7 @@ buildPythonPackage rec {
   version = "1.6.1";
   format = "wheel";
 
-  # 上游只发 wheel（`py3-none-any`，内含几个 ONNX 模型，~76MB）。fetchPypi 的
-  # wheel 名字推导会给成 `py2.py3-none-any`，这里直接钉死真实 URL。
+  # 上游只发 wheel（内含 ONNX 模型，包体大）；fetchPypi 的 wheel 名推导对不上，直接钉真实 URL。
   src = fetchurl {
     url = "https://files.pythonhosted.org/packages/0e/48/cbaed3981b8d8d51141b9b4779b811f4728e65d952a1e3e2e5e929539183/ddddocr-${version}-py3-none-any.whl";
     hash = "sha256-x8cPSuLQM1RArosnLupIyfaIjs70Z4X+IxHwyXoTOTU=";
