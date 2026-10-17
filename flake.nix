@@ -46,6 +46,8 @@
         ha-homeconnect-local = "default";
         # Lume VPS 探针监控客户端（vpsmon-agent）
         lume-agent = "default";
+        # UDP-to-HTTP 组播转单播代理
+        udpxy = "default";
       };
 
       # 按清单构造包：每个键对应 ./pkgs/<键>，ddddocr 是 python 库走 python3.pkgs.callPackage。
@@ -84,6 +86,8 @@
       nixosModules.miloco-omp-agent = import ./modules/miloco-omp-agent.nix;
       # Lume VPS 探针监控 Agent
       nixosModules.lume-agent = import ./modules/lume-agent.nix;
+      # udpxy 组播转单播服务
+      nixosModules.udpxy = import ./modules/udpxy.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = mkOverlay;
