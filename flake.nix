@@ -1,5 +1,5 @@
 {
-  description = "jx8819 的共享 Nix 库：pkgs/ 打包可公开复用的软件，modules/ 定义可复用的 NixOS 选项；部署与私密值留给调用方。";
+  description = "Nix 软件包与 NixOS 模块。";
 
   inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
 
@@ -24,6 +24,10 @@
         omp = "default";
         # 米家自动化规则列表同步 CLI（rules-sync 模块用）
         ros-rules-generator = "default";
+        # 广告过滤列表定时拉取与原子发布
+        adlist-sync = "default";
+        # IPTV 播放列表过滤、合并与组播地址转换
+        iptv-merge = "default";
         # 小米 Mesh 有线组网恢复看门狗
         mesh-guardian = "default";
         # HDSky（hdsky.me）自动签到
@@ -74,6 +78,10 @@
       nixosModules.fan-control = import ./modules/fan-control.nix;
       # ros-rules-generator 规则列表同步（systemd timer）
       nixosModules.rules-sync = import ./modules/rules-sync.nix;
+      # 广告过滤列表定时同步
+      nixosModules.adlist-sync = import ./modules/adlist-sync.nix;
+      # IPTV 多模式播放列表同步
+      nixosModules.iptv-merge = import ./modules/iptv-merge.nix;
       # 小米 Mesh 有线组网恢复看门狗
       nixosModules.mesh-guardian = import ./modules/mesh-guardian.nix;
       # HDSky（hdsky.me）自动签到
