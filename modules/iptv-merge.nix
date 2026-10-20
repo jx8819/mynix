@@ -27,12 +27,13 @@ let
   };
 
   servicePath = [ pkgs.bash pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.coreutils ];
-  # 四模式各发布独立服务与定时器，模式 → 单元名固定映射。
+  # 五模式各发布独立服务与定时器，模式 → 单元名固定映射。
   unitNames = {
     both = "iptv-sync";
     "telecom-only" = "iptv-telecom-sync";
     "mobile-only" = "iptv-mobile-sync";
     multicast = "iptv-multicast-sync";
+    fcc = "iptv-fcc-sync";
   };
 
   mkServiceConfig = outputPath: {
@@ -71,8 +72,8 @@ in
       type = types.listOf (types.submodule {
         options = {
           mode = mkOption {
-            type = types.enum [ "both" "telecom-only" "mobile-only" "multicast" ];
-            description = "合并模式：both / telecom-only / mobile-only / multicast。";
+            type = types.enum [ "both" "telecom-only" "mobile-only" "multicast" "fcc" ];
+            description = "合并模式：both / telecom-only / mobile-only / multicast / fcc（独立的 rtp2httpd FCC 列表）。";
           };
           outputPath = mkOption {
             type = types.str;
@@ -82,6 +83,28 @@ in
             type = types.nullOr types.str;
             default = null;
             description = "组播模式使用的 udpxy 代理地址（例如 proxy.example:4022）。";
+          };
+          fcc = {
+            gateway = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "仅 fcc 模式必填：rtp2httpd 网关 host:port；同时用于订阅源的 udpxy 查询参数。";
+            };
+            address = mkOption {
+              type = types.nullOr types.str;
+              default = null;
+              description = "仅 fcc 模式必填：FCC 服务器 IPv4 地址或主机名，不含协议与端口。";
+            };
+            port = mkOption {
+              type = types.nullOr types.port;
+              default = null;
+              description = "仅 fcc 模式必填：FCC 服务器端口。";
+            };
+            protocol = mkOption {
+              type = types.enum [ "telecom" "huawei" ];
+              default = "telecom";
+              description = "rtp2httpd 的 fcc-type；仅 fcc 模式注入，支持 telecom / huawei。";
+            };
           };
         };
       });
@@ -260,6 +283,14 @@ in
         assertion = lib.all (output: output.mode != "multicast" || output.udpxy != null) cfg.outputs;
         message = "services.iptv-merge: multicast output requires a non-null udpxy address";
       }
+      {
+        assertion = lib.all (output: output.mode != "fcc" || (
+          output.fcc.gateway != null && output.fcc.gateway != "" &&
+          output.fcc.address != null && output.fcc.address != "" &&
+          output.fcc.port != null
+        )) cfg.outputs;
+        message = "services.iptv-merge: fcc output requires non-empty fcc.gateway, fcc.address and an explicit fcc.port";
+      }
     ];
 
     # ReadWritePaths 的目录须在 unit namespace 建立前存在，故声明式预建，不依赖手工残留。
@@ -273,6 +304,8 @@ in
         then "Merge IPTV unicast lists"
         else if output.mode == "multicast"
         then "Publish multicast IPTV list via udpxy (${if output.udpxy != null then output.udpxy else "none"})"
+        else if output.mode == "fcc"
+        then "Publish multicast IPTV list with rtp2httpd FCC"
         else "Publish ${output.mode} IPTV unicast list";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
@@ -282,6 +315,11 @@ in
         IPTV_DST = output.outputPath;
       } // lib.optionalAttrs (output.udpxy != null) {
         IPTV_UDPXY = output.udpxy;
+      } // lib.optionalAttrs (output.mode == "fcc") {
+        IPTV_FCC_GATEWAY = if output.fcc.gateway != null then output.fcc.gateway else "";
+        IPTV_FCC_ADDRESS = if output.fcc.address != null then output.fcc.address else "";
+        IPTV_FCC_PORT = if output.fcc.port != null then toString output.fcc.port else "";
+        IPTV_FCC_PROTOCOL = output.fcc.protocol;
       };
       serviceConfig = mkServiceConfig output.outputPath;
     }) cfg.outputs);

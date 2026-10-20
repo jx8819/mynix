@@ -22,11 +22,12 @@
 , multicastSourceLabel ? "multicast"
 }:
 writeShellScriptBin "iptv-merge" ''
-  # 四种 mode（由各 systemd 单元通过 IPTV_MODE 选择，可同时发布不同模式）:
+  # 五种 mode（由各 systemd 单元通过 IPTV_MODE 选择，可同时发布不同模式）:
   #   - "both"         第一源优先全量（原序）+ 第二源过滤后补第一源没有的台（原序）
   #   - "telecom-only" 只拉取第一源
   #   - "mobile-only"  只拉取第二源
   #   - "multicast"    使用组播订阅源，可添加 udpxy 地址
+  #   - "fcc"          复用组播过滤，仅频道 URL 转为 rtp2httpd RTP + FCC
   # 失败语义（同目录 mktemp+mv 原子替换、trap 双清临时件，任一失败 DST 保旧）:
   #   - 电信阶段（下载/校验/过滤）失败 → 整体 abort
   #   - "both" 的移动阶段（下载/sanitize/校验/过滤）失败 → stderr 打 WARN、跳过移动、仍发布电信-only
@@ -47,6 +48,28 @@ writeShellScriptBin "iptv-merge" ''
   SRC_M="''${IPTV_SRC_MOBILE:-${mobileUrl}}"
   SRC_MC="''${IPTV_SRC_MULTICAST:-${multicastUrl}}"
   UDPXY="''${IPTV_UDPXY:-}"
+  if [ "$MODE" = "fcc" ]; then
+    FCC_GATEWAY="''${IPTV_FCC_GATEWAY:-}"
+    FCC_ADDRESS="''${IPTV_FCC_ADDRESS:-}"
+    FCC_PORT="''${IPTV_FCC_PORT:-}"
+    FCC_PROTOCOL="''${IPTV_FCC_PROTOCOL:-telecom}"
+    fcc_valid_port() {
+      [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
+    }
+    [[ "$FCC_GATEWAY" =~ ^[A-Za-z0-9._-]+:[0-9]{1,5}$ ]] &&
+      fcc_valid_port "''${FCC_GATEWAY##*:}" ||
+      { echo 'iptv-merge: fcc requires IPTV_FCC_GATEWAY as host:port' >&2; exit 1; }
+    [[ "$FCC_ADDRESS" =~ ^[A-Za-z0-9._-]+$ ]] ||
+      { echo 'iptv-merge: fcc requires IPTV_FCC_ADDRESS as a host or IPv4 address' >&2; exit 1; }
+    fcc_valid_port "$FCC_PORT" ||
+      { echo 'iptv-merge: fcc requires IPTV_FCC_PORT in 1..65535' >&2; exit 1; }
+    case "$FCC_PROTOCOL" in
+      telecom|huawei) ;;
+      *) echo 'iptv-merge: IPTV_FCC_PROTOCOL must be telecom or huawei' >&2; exit 1 ;;
+    esac
+    # 仅 fcc 改用其专属网关请求源；旧模式的 IPTV_UDPXY/query 路径不变。
+    UDPXY="$FCC_GATEWAY"
+  fi
   if [ -n "$UDPXY" ]; then
     if [[ "$SRC_MC" == *"?"* ]]; then
       SRC_MC="''${SRC_MC}&udpxy=''${UDPXY}"
@@ -75,7 +98,7 @@ writeShellScriptBin "iptv-merge" ''
 
   # ---- 模式合法性先于任何文件动作（未知模式 fail-fast，不碰 DST 目录）----
   case "$MODE" in
-    telecom-only|mobile-only|both|multicast) ;;
+    telecom-only|mobile-only|both|multicast|fcc) ;;
     *) echo "iptv-merge: unknown mode: $MODE" >&2; exit 1 ;;
   esac
 
@@ -418,9 +441,50 @@ writeShellScriptBin "iptv-merge" ''
     mv -f "$TMPMC" "$DST"
     TMPMC=""
   }
+  # FCC 只变换已过滤的频道 URL；头部/EXTINF 原样，全部转换成功才进入原子发布。
+  publish_fcc() {
+    awk -v gateway="$FCC_GATEWAY" -v address="$FCC_ADDRESS" -v port="$FCC_PORT" -v protocol="$FCC_PROTOCOL" '
+      function fail(message) {
+        print "fcc: " message " at line " NR > "/dev/stderr"
+        exit 1
+      }
+      NR == 1 || /^#EXTINF/ { print; next }
+      {
+        url = $0
+        fragment = ""
+        pos = index(url, "#")
+        if (pos) { fragment = substr(url, pos); url = substr(url, 1, pos - 1) }
+        query = ""
+        pos = index(url, "?")
+        if (pos) { query = substr(url, pos + 1); url = substr(url, 1, pos - 1) }
+        if (url !~ /^http:\/\/[^/?#[:space:]]+\/(udp|rtp)\/[0-9.]+:[0-9]+$/)
+          fail("unsupported multicast URL")
+        sub(/^http:\/\/[^/]+\/(udp|rtp)\//, "", url)
+        split(url, endpoint, ":")
+        if (split(endpoint[1], octets, /[.]/) != 4) fail("invalid multicast address")
+        for (i = 1; i <= 4; i++)
+          if (octets[i] !~ /^[0-9]+$/ || octets[i] + 0 > 255)
+            fail("invalid multicast address")
+        if (octets[1] + 0 < 224 || octets[1] + 0 > 239) fail("not a multicast address")
+        if (endpoint[2] + 0 < 1 || endpoint[2] + 0 > 65535) fail("invalid multicast port")
+        kept = ""
+        count = split(query, params, "&")
+        for (i = 1; i <= count; i++) {
+          key = params[i]
+          sub(/=.*/, "", key)
+          if (key == "fcc" || key == "fcc-type" || params[i] == "") continue
+          kept = kept (kept == "" ? "" : "&") params[i]
+        }
+        print "http://" gateway "/rtp/" url "?" (kept == "" ? "" : kept "&") \
+          "fcc=" address ":" port "&fcc-type=" protocol fragment
+      }
+    ' "$TMPMC" > "$TMPMC.hdr"
+    mv -f "$TMPMC.hdr" "$TMPMC"
+    publish_multicast
+  }
 
 
-  # ---- 三模式分派 ----
+  # ---- 五模式分派 ----
   case "$MODE" in
     telecom-only)
       # 只拉第一源；失败保留旧产物。
@@ -514,6 +578,13 @@ writeShellScriptBin "iptv-merge" ''
       multicast_stage
       publish_multicast
       echo "multicast-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp"
+      ;;
+    fcc)
+      rm -f "$TMP"; TMP=""
+      TMPMC=$(mktemp "''${DST%/*}/.iptv-mcast.XXXXXX")
+      multicast_stage
+      publish_fcc
+      echo "fcc-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp"
       ;;
   esac
 
