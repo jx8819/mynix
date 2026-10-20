@@ -105,6 +105,11 @@ in
               default = "telecom";
               description = "rtp2httpd 的 fcc-type；仅 fcc 模式注入，支持 telecom / huawei。";
             };
+            includeMobile = mkOption {
+              type = types.bool;
+              default = false;
+              description = "仅 fcc 模式：复用 mobile 校验/过滤与 merge.strategy 补充频道；移动 URL 原样保留，不添加 FCC。";
+            };
           };
         };
       });
@@ -213,7 +218,7 @@ in
       };
     };
 
-    # 合并策略（both 模式下移动源的取舍规则）
+    # 合并策略（both 或启用 fcc.includeMobile 时移动源的取舍规则）
     merge = {
       strategy = mkOption {
         type = types.enum [ "smart" "exact" "off" ];
@@ -320,6 +325,7 @@ in
         IPTV_FCC_ADDRESS = if output.fcc.address != null then output.fcc.address else "";
         IPTV_FCC_PORT = if output.fcc.port != null then toString output.fcc.port else "";
         IPTV_FCC_PROTOCOL = output.fcc.protocol;
+        IPTV_FCC_INCLUDE_MOBILE = if output.fcc.includeMobile then "1" else "0";
       };
       serviceConfig = mkServiceConfig output.outputPath;
     }) cfg.outputs);

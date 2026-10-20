@@ -27,10 +27,10 @@ writeShellScriptBin "iptv-merge" ''
   #   - "telecom-only" 只拉取第一源
   #   - "mobile-only"  只拉取第二源
   #   - "multicast"    使用组播订阅源，可添加 udpxy 地址
-  #   - "fcc"          复用组播过滤，仅频道 URL 转为 rtp2httpd RTP + FCC
+  #   - "fcc"          复用组播过滤，主源 URL 转为 rtp2httpd RTP + FCC，可选补充移动源
   # 失败语义（同目录 mktemp+mv 原子替换、trap 双清临时件，任一失败 DST 保旧）:
   #   - 电信阶段（下载/校验/过滤）失败 → 整体 abort
-  #   - "both" 的移动阶段（下载/sanitize/校验/过滤）失败 → stderr 打 WARN、跳过移动、仍发布电信-only
+  #   - "both" / 启用移动补充的 "fcc"：移动阶段失败 → stderr 打 WARN、跳过移动、仍发布主源
   #   - "mobile-only" 阶段失败 → 整体 abort
   #
   # 单元必须设置 IPTV_MODE/IPTV_DST；IPTV_SRC / IPTV_SRC_MOBILE / IPTV_SRC_MULTICAST 可覆盖源 URL。
@@ -53,6 +53,11 @@ writeShellScriptBin "iptv-merge" ''
     FCC_ADDRESS="''${IPTV_FCC_ADDRESS:-}"
     FCC_PORT="''${IPTV_FCC_PORT:-}"
     FCC_PROTOCOL="''${IPTV_FCC_PROTOCOL:-telecom}"
+    FCC_INCLUDE_MOBILE="''${IPTV_FCC_INCLUDE_MOBILE-0}"
+    case "$FCC_INCLUDE_MOBILE" in
+      0|1) ;;
+      *) echo 'iptv-merge: IPTV_FCC_INCLUDE_MOBILE must be 0 or 1' >&2; exit 1 ;;
+    esac
     fcc_valid_port() {
       [[ "$1" =~ ^[0-9]{1,5}$ ]] && (( 10#$1 >= 1 && 10#$1 <= 65535 ))
     }
@@ -274,8 +279,8 @@ writeShellScriptBin "iptv-merge" ''
     FILT=""                                   # 过滤结果接管 $TMP → 发布段读取本文件
   }
 
-  # ---- 移动阶段（mobile-only 直跑；both 在受控子壳里跑，失败降级为电信-only）----
-  # 阶段内任何失败 = 本阶段失败: mobile-only → set -e 整体 abort 保旧；both → 父壳 WARN 降级发布
+  # ---- 移动阶段（mobile-only 直跑；both / fcc 补充在受控子壳里跑，失败降级为主源）----
+  # 阶段内任何失败 = 本阶段失败: mobile-only → set -e 整体 abort 保旧；补充路径 → 父壳 WARN 降级发布
   mobile_stage() {
     # 1) 下载移动源到同目录临时文件（三超时/重试与电信同参数，失败不改动 DST）
     curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 10 "$SRC_M" -o "$TMPM"
@@ -295,10 +300,10 @@ writeShellScriptBin "iptv-merge" ''
 
     # 4) 过滤（fold=1；bl=MO_BL_LC 已 bash 小写化、gs=移动 dropGroups）
     filter_stage "$SANM" "$FILTM" "$STAT_M" "$MO_BL_LC" "$MO_GS" 1
-    # 五计数不在此读——both 模式本函数跑在子壳里（子壳变量出不了壳），由父壳回读 STAT_M 文件
+    # 五计数不在此读——补充路径跑在子壳里（子壳变量出不了壳），由父壳回读 STAT_M 文件
   }
 
-  # ---- merge（both 模式、移动 filter 成功后）：单 awk 两文件趟（NR==FNR 第一趟建电信键集）----
+  # ---- merge（both / fcc 补充、移动 filter 成功后）：单 awk 两文件趟（NR==FNR 第一趟建主源键集）----
   #   norm(x) = tolower → 依次 gsub 超高清/高清/标清/超清/hd/4k（与分组索引同序，超高清先于高清）
   #              → trim 首尾空白
   #   tcKeys  = 电信全部 survivor 的 norm(t)；tcCores：norm(t) 匹配 ^cctv[0-9] 者取
@@ -441,8 +446,8 @@ writeShellScriptBin "iptv-merge" ''
     mv -f "$TMPMC" "$DST"
     TMPMC=""
   }
-  # FCC 只变换已过滤的频道 URL；头部/EXTINF 原样，全部转换成功才进入原子发布。
-  publish_fcc() {
+  # FCC 只变换已过滤的主源 URL；移动源尚未合并，转换失败则不发布。
+  fcc_stage() {
     awk -v gateway="$FCC_GATEWAY" -v address="$FCC_ADDRESS" -v port="$FCC_PORT" -v protocol="$FCC_PROTOCOL" '
       function fail(message) {
         print "fcc: " message " at line " NR > "/dev/stderr"
@@ -480,7 +485,6 @@ writeShellScriptBin "iptv-merge" ''
       }
     ' "$TMPMC" > "$TMPMC.hdr"
     mv -f "$TMPMC.hdr" "$TMPMC"
-    publish_multicast
   }
 
 
@@ -583,8 +587,53 @@ writeShellScriptBin "iptv-merge" ''
       rm -f "$TMP"; TMP=""
       TMPMC=$(mktemp "''${DST%/*}/.iptv-mcast.XXXXXX")
       multicast_stage
-      publish_fcc
-      echo "fcc-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp"
+      fcc_stage
+      if [ "$FCC_INCLUDE_MOBILE" = "0" ]; then
+        publish_multicast
+        echo "fcc-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp"
+      else
+        TMPM=$(mktemp "''${DST%/*}/.iptv-mobile.XXXXXX")
+        SANM=$(mktemp "''${DST%/*}/.iptv-msan.XXXXXX")
+        FILTM=$(mktemp "''${DST%/*}/.iptv-mfilt.XXXXXX")
+        STAT_M=$(mktemp "''${DST%/*}/.iptv-mstats.XXXXXX")
+        # 与 both 相同：普通子壳命令恢复 errexit，不能放在 if/! 条件上下文。
+        set +e
+        ( set -e; mobile_stage )
+        mob_st=$?
+        set -e
+        if [ "$mob_st" -ne 0 ]; then
+          echo "WARN: mobile source failed, publishing FCC primary only" >&2
+          rm -f "$TMPM" "$SANM" "$FILTM" "$STAT_M"; TMPM=""; SANM=""; FILTM=""; STAT_M=""
+          publish_multicast
+          echo "fcc-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp mobile_skipped=1"
+        else
+          read -r fm_blk fm_sib fm_blo fm_dpb fm_grp < "$STAT_M"
+          m_black=''${fm_blk#blacklist=}
+          m_sib=''${fm_sib#sibling=}
+          m_block=''${fm_blo#block=}
+          m_dp3=''${fm_dpb#dp3=}
+          m_grp=''${fm_grp#group=}
+          rm -f "$STAT_M"; STAT_M=""
+          rm -f "$TMPM" "$SANM"; TMPM=""; SANM=""
+          STAT_MG=$(mktemp "''${DST%/*}/.iptv-mergestats.XXXXXX")
+          MRG=$(mktemp "''${DST%/*}/.iptv-merged.XXXXXX")
+          merge_stage "$TMPMC" "$FILTM" "$MRG" "$STAT_MG" "$STRATEGY"
+          read -r gm_kep gm_tc gm_m0 gm_ded gm_dup < "$STAT_MG"
+          n_kept=''${gm_kep#mobile_kept=}
+          n_tck=''${gm_tc#telecom_kept=}
+          n_m0=''${gm_m0#mobile_total=}
+          n_ded=''${gm_ded#dedup=}
+          n_dup=''${gm_dup#merged_dup=}
+          rm -f "$STAT_MG"; STAT_MG=""
+          rm -f "$TMPMC" "$FILTM"; TMPMC=""; FILTM=""
+          UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c "^#EXTINF" "$MRG") src=${multicastSourceLabel}+${mobileSourceLabel} udpxy=$UDPXY merged=+$n_kept multicast_filtered_out:block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black group=$n_mc_grp mobile_filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
+          { head -n1 "$MRG"; echo "$UPD"; tail -n +2 "$MRG"; } > "$MRG.hdr" && mv -f "$MRG.hdr" "$MRG"
+          chmod 644 "$MRG"
+          mv -f "$MRG" "$DST"
+          MRG=""
+          echo "fcc-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp mobile-filter: filtered_out block=$m_block sibling=$m_sib blacklist=$m_black dp3=$m_dp3 group=$m_grp merge: mobile_kept=+$n_kept multicast_kept=$n_tck mobile_total=$n_m0 dedup=$n_ded merged_dup=$n_dup"
+        fi
+      fi
       ;;
   esac
 
