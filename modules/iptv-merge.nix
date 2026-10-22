@@ -21,13 +21,19 @@ let
     multicastRequirePattern = cfg.multicast.requirePattern;
     multicastBlacklist = cfg.multicast.blacklist;
     multicastDropGroups = cfg.multicast.dropGroups;
+    sportsUrl = cfg.sports.url;
+    sportsMinChannels = cfg.sports.minChannels;
+    sportsRequirePattern = cfg.sports.requirePattern;
+    sportsBlacklist = cfg.sports.blacklist;
+    sportsDropGroups = cfg.sports.dropGroups;
     telecomSourceLabel = cfg.telecom.sourceLabel;
     mobileSourceLabel = cfg.mobile.sourceLabel;
     multicastSourceLabel = cfg.multicast.sourceLabel;
+    sportsSourceLabel = cfg.sports.sourceLabel;
   };
 
   servicePath = [ pkgs.bash pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.coreutils ];
-  # 五模式各发布独立服务与定时器，模式 → 单元名固定映射。
+  # 五个基础模式保留原单元名；体育补充输出使用独立服务与定时器。
   unitNames = {
     both = "iptv-sync";
     "telecom-only" = "iptv-telecom-sync";
@@ -35,6 +41,9 @@ let
     multicast = "iptv-multicast-sync";
     fcc = "iptv-fcc-sync";
   };
+  unitName = output:
+    let base = unitNames.${output.mode};
+    in if output.sports then "${lib.removeSuffix "-sync" base}-sports-sync" else base;
 
   mkServiceConfig = outputPath: {
     Type = "oneshot";
@@ -74,6 +83,11 @@ in
           mode = mkOption {
             type = types.enum [ "both" "telecom-only" "mobile-only" "multicast" "fcc" ];
             description = "合并模式：both / telecom-only / mobile-only / multicast / fcc（独立的 rtp2httpd FCC 列表）。";
+          };
+          sports = mkOption {
+            type = types.bool;
+            default = false;
+            description = "在基础模式转换/合并完成后追加独立体育源；失败时保留完整旧产物。";
           };
           outputPath = mkOption {
             type = types.str;
@@ -218,6 +232,40 @@ in
       };
     };
 
+    # 可选体育补充源；站点自行指定订阅地址和过滤规则。
+    sports = {
+      url = mkOption {
+        type = types.str;
+        default = "";
+        description = "体育补充源订阅 URL，仅 sports = true 的输出拉取。";
+      };
+      sourceLabel = mkOption {
+        type = types.str;
+        default = "sports";
+        description = "体育补充源在生成的 M3U # updated 行内的标识。";
+      };
+      minChannels = mkOption {
+        type = types.int;
+        default = 1;
+        description = "体育源最少 #EXTINF 条数，低于则拒收保旧。";
+      };
+      requirePattern = mkOption {
+        type = types.str;
+        default = ".";
+        description = "体育源必须包含的 URL 特征（不匹配则拒收）。";
+      };
+      blacklist = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "体育源显示名（EXTINF 逗号后）黑名单，不按 tvg-name 或 tvg-id 过滤。";
+      };
+      dropGroups = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "按 group-title 精确匹配整组剔除的分组名。";
+      };
+    };
+
     # 合并策略（both 或启用 fcc.includeMobile 时移动源的取舍规则）
     merge = {
       strategy = mkOption {
@@ -277,8 +325,8 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
-        assertion = lib.length (lib.unique (map (output: output.mode) cfg.outputs)) == lib.length cfg.outputs;
-        message = "services.iptv-merge.outputs must have unique modes";
+        assertion = lib.length (lib.unique (map unitName cfg.outputs)) == lib.length cfg.outputs;
+        message = "services.iptv-merge.outputs must have unique mode + sports combinations";
       }
       {
         assertion = lib.length (lib.unique (map (output: output.outputPath) cfg.outputs)) == lib.length cfg.outputs;
@@ -303,7 +351,7 @@ in
       (dir: "d ${dir} 0755 ${cfg.service.user} ${cfg.service.group} - -")
       (lib.unique (map (output: lib.dirOf output.outputPath) cfg.outputs));
 
-    systemd.services = lib.listToAttrs (map (output: lib.nameValuePair unitNames.${output.mode} {
+    systemd.services = lib.listToAttrs (map (output: lib.nameValuePair (unitName output) {
       description =
         if output.mode == "both"
         then "Merge IPTV unicast lists"
@@ -317,6 +365,7 @@ in
       path = servicePath;
       environment = {
         IPTV_MODE = output.mode;
+        IPTV_SPORTS = if output.sports then "1" else "0";
         IPTV_DST = output.outputPath;
       } // lib.optionalAttrs (output.udpxy != null) {
         IPTV_UDPXY = output.udpxy;
@@ -330,7 +379,7 @@ in
       serviceConfig = mkServiceConfig output.outputPath;
     }) cfg.outputs);
 
-    systemd.timers = lib.listToAttrs (map (output: lib.nameValuePair unitNames.${output.mode} {
+    systemd.timers = lib.listToAttrs (map (output: lib.nameValuePair (unitName output) {
       wantedBy = [ "timers.target" ];
       timerConfig = commonTimerConfig;
     }) cfg.outputs);

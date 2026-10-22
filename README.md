@@ -11,17 +11,17 @@ Nix 软件包与 NixOS 模块。
 ## IPTV 多模式同步与 FCC
 
 `nixosModules.iptv-merge` 的过滤/发布程序位于 `pkgs/iptv-merge`。每个
-`services.iptv-merge.outputs` 项独立写入自己的 `outputPath`，模式与 service/timer
+`services.iptv-merge.outputs` 项独立写入自己的 `outputPath`，基础模式与 service/timer
 名称固定对应：`both` → `iptv-sync`、`telecom-only` → `iptv-telecom-sync`、
 `mobile-only` → `iptv-mobile-sync`、`multicast` → `iptv-multicast-sync`、
-`fcc` → `iptv-fcc-sync`。已有四种模式的源、URL 与默认配置不变。
+`fcc` → `iptv-fcc-sync`。`sports` 默认关闭，既有五类输出的源、URL 与默认配置不变。
 
 在已启用、已配置运行用户及 `multicast.url` 的实例中，可追加一个独立 FCC 输出
 （以下均为文档示例地址；实际站点参数放在消费此模块的配置仓库）：
 
 ```nix
 services.iptv-merge.outputs = [
-  # 原有输出继续保留，各模式与 outputPath 均须唯一。
+  # 原有输出继续保留，(mode, sports) 组合与 outputPath 均须唯一。
   {
     mode = "fcc";
     outputPath = "/srv/iptv/iptv-fcc.m3u";
@@ -73,6 +73,38 @@ FCC 配置缺失、非法端口、未知协议、主源结构损坏或不支持�
 仅 FCC 模式会读取这些 `IPTV_FCC_*` 变量并以其网关代替 `IPTV_UDPXY`；
 NixOS 模块也仅为 FCC 单元注入这些变量。
 
+### 可选体育补充
+
+每个输出都可设置 `sports = true;`，与基础 `mode` 独立组合。原地址不变时，新增一项
+不同 `outputPath` 的输出即可发布独立下载地址；同一 `(mode, sports)` 组合仍只能定义一次。
+体育源 URL、黑名单与分组规则由站点显式配置，通用模块不内置订阅源或频道偏好：
+
+```nix
+services.iptv-merge.sports = {
+  url = "https://sports.example/playlist.m3u";
+  blacklist = [ "Exclude" "Guide" ];
+};
+services.iptv-merge.outputs = [
+  { mode = "telecom-only"; outputPath = "/srv/iptv/telecom.m3u"; }
+  { mode = "telecom-only"; sports = true; outputPath = "/srv/iptv/telecom-sports.m3u"; }
+];
+```
+
+体育变体的单元名在原名末尾的 `-sync` 前加 `-sports`，例如
+`iptv-telecom-sports-sync`、`iptv-fcc-sports-sync`；`both` 对应 `iptv-sports-sync`。
+`fcc` 可同时设置 `fcc.includeMobile = true;` 与 `sports = true;`。
+
+`sports` 的 `sourceLabel`、`minChannels`、`requirePattern`、`blacklist`、`dropGroups`
+沿用其他源的配置语义。黑名单匹配 `#EXTINF` 逗号后的显示名，而非 `tvg-name`；
+体育补充只做结构校验与显式黑名单/分组过滤，不套用基础源的去重、同名/高清优选或
+`merge.strategy`。存活频道按体育源原序追加，EXTINF 与 URL/查询参数/fragment 原样保留，
+不经过 udpxy 或 FCC 改写，输出仍只有一个 M3U 头。
+
+未开启时不下载体育源；开启后体育下载、校验或过滤失败会保留旧的完整输出，
+不会先发布缺少体育频道的基础列表。CLI 使用 `IPTV_SPORTS=1` 开启（省略为 `0`，
+只接受 `0` / `1`），`IPTV_SRC_SPORTS` 可覆盖体育订阅 URL。
+
+
 ### 离线回归 smoke
 
 没有额外测试框架；`pkgs/iptv-merge/smoke-test.py` 接收**实际构建的可执行文件**，
@@ -87,7 +119,9 @@ python3 pkgs/iptv-merge/smoke-test.py ./result/bin/iptv-merge
 覆盖 UDP/RTP 路径转换、查询参数保留与 FCC 覆盖、协议默认值、共享过滤、
 高清/HD 名称重叠、CCTV 裸号/加号去重、CCTV4K 与移动独有频道保留、
 移动 URL/元数据/追加顺序不变、显式关闭补充、移动失败降级、旧 multicast 行为不变，
-以及非法 FCC 配置/损坏主源的原子保旧和临时文件清理；不依赖日志或状态注释的具体措辞。
+以及体育补充的五模式组合、FCC+移动+体育隔离、共享元数据的不同频道保留、
+关闭时不拉取体育源、体育失败原子保旧、非法配置/损坏源与临时文件清理；
+不依赖日志或状态注释的具体措辞。
 
 默认软件包没有站点黑名单或剔除组；要用同一真实 CLI 验证这两个过滤项，可构建仅为静态
 fixture 配置的实例（仍无外网上游请求）：
@@ -98,14 +132,16 @@ nix build --impure --out-link result-iptv-smoke --expr '
   in flake.packages.x86_64-linux.iptv-merge.override {
     mobileBlacklist = [ "BLOCKED CANDIDATE" ];
     mobileDropGroups = [ "Excluded" ];
+    sportsBlacklist = [ "睛彩" "说明" ];
     mergeStrategy = "smart";
   }'
 python3 pkgs/iptv-merge/smoke-test.py ./result-iptv-smoke/bin/iptv-merge \
-  --mobile-filters --strategy smart
+  --mobile-filters --sports-filters --strategy smart
 ```
 
-fixture 同时包含大小写混合的黑名单候选与命中剔除组的候选，开启 `--mobile-filters`
-后断言二者均不进入结果。再分别把构建参数 `mergeStrategy` 与运行参数 `--strategy`
-改为 `exact`、`off`，即可验证相应去重/追加行为；这些运行参数仅声明待测程序的构建配置，
-不会修改程序或模拟其过滤逻辑。生产实例还应使用实际配置的构建产物与固定订阅快照验证
-站点黑名单/分组规则，并对比原有四个输出。
+fixture 包含大小写混合的移动黑名单候选、命中剔除组的候选，以及显示名含
+`睛彩` / `说明`、但 `tvg-name` 与正常体育频道相同的候选。`--mobile-filters` /
+`--sports-filters` 声明待测程序已使用对应构建参数，断言被排除频道不进入结果。
+再分别把构建参数 `mergeStrategy` 与运行参数 `--strategy` 改为 `exact`、`off`，
+即可验证相应去重/追加行为；这些运行参数不会修改程序或模拟其过滤逻辑。
+生产实例还应使用实际配置的构建产物与固定订阅快照验证站点规则，并对比原有五类输出。

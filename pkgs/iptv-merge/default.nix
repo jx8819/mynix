@@ -17,9 +17,15 @@
 , multicastRequirePattern ? "."
 , multicastBlacklist ? []
 , multicastDropGroups ? []
+, sportsUrl ? ""
+, sportsMinChannels ? 1
+, sportsRequirePattern ? "."
+, sportsBlacklist ? []
+, sportsDropGroups ? []
 , telecomSourceLabel ? "telecom"
 , mobileSourceLabel ? "mobile"
 , multicastSourceLabel ? "multicast"
+, sportsSourceLabel ? "sports"
 }:
 writeShellScriptBin "iptv-merge" ''
   # 五种 mode（由各 systemd 单元通过 IPTV_MODE 选择，可同时发布不同模式）:
@@ -28,12 +34,14 @@ writeShellScriptBin "iptv-merge" ''
   #   - "mobile-only"  只拉取第二源
   #   - "multicast"    使用组播订阅源，可添加 udpxy 地址
   #   - "fcc"          复用组播过滤，主源 URL 转为 rtp2httpd RTP + FCC，可选补充移动源
+  # 每种模式均可用 IPTV_SPORTS=1 追加独立体育源；不参与基础源的去重或 URL 转换。
   # 失败语义（同目录 mktemp+mv 原子替换、trap 双清临时件，任一失败 DST 保旧）:
   #   - 电信阶段（下载/校验/过滤）失败 → 整体 abort
   #   - "both" / 启用移动补充的 "fcc"：移动阶段失败 → stderr 打 WARN、跳过移动、仍发布主源
   #   - "mobile-only" 阶段失败 → 整体 abort
+  #   - 启用体育补充：下载/校验/过滤失败 → 整体 abort，禁止提前发布基础源
   #
-  # 单元必须设置 IPTV_MODE/IPTV_DST；IPTV_SRC / IPTV_SRC_MOBILE / IPTV_SRC_MULTICAST 可覆盖源 URL。
+  # 单元必须设置 IPTV_MODE/IPTV_DST；IPTV_SRC / IPTV_SRC_MOBILE / IPTV_SRC_MULTICAST / IPTV_SRC_SPORTS 可覆盖源 URL。
   #
   # 假设【契约】: 黑名单与 dropGroups 元素均为字面文本，不含 "|" 且不含单引号——
   #   包内 lib.concatStringsSep "|" 拼接后分别作 awk 动态正则（bl）与 split 成员匹配串（gs），
@@ -41,12 +49,18 @@ writeShellScriptBin "iptv-merge" ''
   #   空黑名单编译成不匹配任何非空频道名的 ^$；非空黑名单按原有规则拼接。
   set -euo pipefail
 
-  # ---- 单元运行参数 + 可由 IPTV_SRC / IPTV_SRC_MOBILE / IPTV_SRC_MULTICAST 覆盖的源与过滤配置 ----
+  # ---- 单元运行参数 + 可由 IPTV_SRC* 覆盖的源与过滤配置 ----
   MODE="''${IPTV_MODE:?IPTV_MODE must be set}"
   DST="''${IPTV_DST:?IPTV_DST must be set}"
   SRC="''${IPTV_SRC:-${telecomUrl}}"
   SRC_M="''${IPTV_SRC_MOBILE:-${mobileUrl}}"
   SRC_MC="''${IPTV_SRC_MULTICAST:-${multicastUrl}}"
+  SRC_SP="''${IPTV_SRC_SPORTS:-${sportsUrl}}"
+  SPORTS="''${IPTV_SPORTS-0}"
+  case "$SPORTS" in
+    0|1) ;;
+    *) echo 'iptv-merge: IPTV_SPORTS must be 0 or 1' >&2; exit 1 ;;
+  esac
   UDPXY="''${IPTV_UDPXY:-}"
   if [ "$MODE" = "fcc" ]; then
     FCC_GATEWAY="''${IPTV_FCC_GATEWAY:-}"
@@ -99,6 +113,11 @@ writeShellScriptBin "iptv-merge" ''
   MC_REQ="${multicastRequirePattern}"
   MC_BL="${if multicastBlacklist == [] then "^$" else lib.concatStringsSep "|" multicastBlacklist}"
   MC_GS="${lib.concatStringsSep "|" multicastDropGroups}"
+  # 可选体育补充源参数
+  SP_MIN="${toString sportsMinChannels}"
+  SP_REQ="${sportsRequirePattern}"
+  SP_BL="${if sportsBlacklist == [] then "^$" else lib.concatStringsSep "|" sportsBlacklist}"
+  SP_GS="${lib.concatStringsSep "|" sportsDropGroups}"
   STRATEGY="${mergeStrategy}"
 
   # ---- 模式合法性先于任何文件动作（未知模式 fail-fast，不碰 DST 目录）----
@@ -111,15 +130,17 @@ writeShellScriptBin "iptv-merge" ''
   TMP=$(mktemp "''${DST%/*}/.iptv-unicast.XXXXXX")
   FILT=""; STAT=""; TMPM=""; SANM=""; FILTM=""; STAT_M=""; STAT_MG=""; MRG=""
   TMPMC=""; FILTMC=""; STAT_MC=""
-  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC"' EXIT
-  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC"; exit 1' HUP INT TERM
+  TMPSP=""; SANSP=""; FILTSP=""; STAT_SP=""
+  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC" "$TMPSP" "$SANSP" "$FILTSP" "$STAT_SP"' EXIT
+  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC" "$TMPSP" "$SANSP" "$FILTSP" "$STAT_SP"; exit 1' HUP INT TERM
 
   # v3-filter-begin —— 以下至 v3-filter-end 为底本 v3 过滤阶段（测试提取锚点，勿删）
   # 2.5) awk 单趟过滤：主规则只分类采集，判决与统计集中在 END 一趟完成（不回读文件、原序可回放）
   filter_stage() {
     # $1=输入（已过校验门的源文件） $2=输出（头部+存活对） $3=统计文件
     # $4=bl 黑名单 |-join 正则串  $5=gs dropGroups |-join 成员串  $6=fold（0=原字面 / 1=tolower 折叠）
-    awk -v stats="$3" -v bl="$4" -v gs="$5" -v fold="$6" '
+    # $7=additive（1=仅结构校验/名字黑名单/组剔除，保持全部幸存对；0=基础源原有规则）
+    awk -v stats="$3" -v bl="$4" -v gs="$5" -v fold="$6" -v additive="$7" '
       # ---- 采集段：每行只登记，不做任何删除决定（保证输出顺序=输入顺序）----
       NR == 1 {
         # 首行必须是 #EXTM3U；头部单独留档，输出时原样打头（头原样纪律）
@@ -163,7 +184,7 @@ writeShellScriptBin "iptv-merge" ''
 
         # ---- 终裁P3 前置：全局同名坍缩（先于 R3 与组员计数；文件序留首、后续整对丢弃、c_dp3++）----
         #   否则重复条目会经组员计数误触整组剔除并产生错误统计。
-        for (i = 1; i <= n; i++) {
+        for (i = 1; !additive && i <= n; i++) {
           if (drop[i]) continue
           if (cdup[disp[i]]++) { drop[i] = 1; c_dp3++ }
         }
@@ -183,7 +204,7 @@ writeShellScriptBin "iptv-merge" ''
         }
 
         # ---- 基名分组索引：仅黑名单幸存者入组（黑名单先行的字面顺序在这里落地）----
-        for (i = 1; i <= n; i++) {
+        for (i = 1; !additive && i <= n; i++) {
           if (drop[i]) continue
           b = tolower(disp[i])
           # 变体标记剥离 i 语义 = 先 tolower 再剥小写表；长词优先：超高清 必须先于 高清（前者包含后者，
@@ -205,7 +226,7 @@ writeShellScriptBin "iptv-merge" ''
         #   若改按剥离表读法，未来 {X标清,X} 型组会绕过决策点2 落入 R1 静默清空、无 WARN 不计 block
         #   实现注：awk 正则字面量没有 /i 旗标（写了会被当成变量拼接，静默永不命中——已实测踩坑），
         #   i 语义改由 tolower 实现，与剥离表同一套小写化，命中面等价 /高清|4k/i
-        for (i = 1; i <= n; i++) {
+        for (i = 1; !additive && i <= n; i++) {
           if (drop[i]) continue
           if (gcount[grp[i]] > 1 && tolower(disp[i]) ~ /高清|4k|hd/) { cand[i] = 1; ghas[grp[i]] = 1 }
         }
@@ -214,9 +235,9 @@ writeShellScriptBin "iptv-merge" ''
         for (i = 1; i <= n; i++) {
           if (drop[i]) continue
           b = grp[i]
-          if (gcount[b] == 1) {
+          if (additive || gcount[b] == 1) {
             keep[i] = 1
-            # R2：组员==1 独一无二保留（无标记也留）
+            # 体育补充保持全部幸存对；基础源 R2：组员==1 独一无二保留（无标记也留）
           } else if (!ghas[b]) {
             drop[i] = 1
             # 决策点2：多员组零标记 → 字面全否；block 按组计数，成员不入 sibling；
@@ -249,7 +270,7 @@ writeShellScriptBin "iptv-merge" ''
       }
     ' "$1" > "$2"
   }
-  # v3-filter-end（调用点在三个源的过滤阶段，五计数读取保持原有格式）
+  # v3-filter-end（四个源共用结构/黑名单/组规则；体育不启用基础源去重，统计格式不变）
 
   # ---- 第一源阶段（telecom-only / both 共用；任一失败整体 abort 保旧）----
   telecom_stage() {
@@ -263,7 +284,7 @@ writeShellScriptBin "iptv-merge" ''
 
     FILT=$(mktemp "''${DST%/*}/.iptv-filtered.XXXXXX")
     STAT=$(mktemp "''${DST%/*}/.iptv-stats.XXXXXX")
-    filter_stage "$TMP" "$FILT" "$STAT" "$TC_BL" "$TC_GS" 0      # 非零退出 → set -e 断 → trap 清临时件 → DST 保旧不 mv
+    filter_stage "$TMP" "$FILT" "$STAT" "$TC_BL" "$TC_GS" 0 0  # 非零退出 → set -e 断 → trap 清临时件 → DST 保旧不 mv
     # 过滤阶段禁管道、禁 ||true/条件包裹【审查 S3】：awk 直重定向，set -e 直达、pipefail/SIGPIPE 零暴露
     # 读五计数（stats 行格式固定: blacklist=N sibling=N block=N dp3=N group=N）
     # 单位【审查 S1】: blacklist/sibling/dp3=条数、block=组数 → block>0 时各数之和≠删除条数（被否组成员不入按条桶）
@@ -299,8 +320,47 @@ writeShellScriptBin "iptv-merge" ''
     grep -qE "$MO_REQ" "$SANM" || { echo 'no http url' >&2; exit 1; }
 
     # 4) 过滤（fold=1；bl=MO_BL_LC 已 bash 小写化、gs=移动 dropGroups）
-    filter_stage "$SANM" "$FILTM" "$STAT_M" "$MO_BL_LC" "$MO_GS" 1
+    filter_stage "$SANM" "$FILTM" "$STAT_M" "$MO_BL_LC" "$MO_GS" 1 0
     # 五计数不在此读——补充路径跑在子壳里（子壳变量出不了壳），由父壳回读 STAT_M 文件
+  }
+
+  # ---- 体育补充源：仅名字/分组过滤，不套用基础源的同名、清晰度或跨源去重 ----
+  sports_stage() {
+    TMPSP=$(mktemp "''${DST%/*}/.iptv-sports.XXXXXX")
+    SANSP=$(mktemp "''${DST%/*}/.iptv-sportssan.XXXXXX")
+    FILTSP=$(mktemp "''${DST%/*}/.iptv-sportsfilt.XXXXXX")
+    STAT_SP=$(mktemp "''${DST%/*}/.iptv-sportsstats.XXXXXX")
+    curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 10 "$SRC_SP" -o "$TMPSP"
+    # 与移动源相同：只丢空行和非 EXTINF 注释，EXTINF 与 URL 原样交给结构校验。
+    awk 'NR == 1 { print; next }
+         /^[[:space:]]*$/ { next }
+         /^#/ { if ($0 !~ /^#EXTINF/) next; print; next }
+         { print }' "$TMPSP" > "$SANSP"
+    head -n1 "$SANSP" | grep -q '^#EXTM3U' || { echo 'sports: bad header' >&2; exit 1; }
+    [ "$(grep -c '^#EXTINF' "$SANSP")" -ge "$SP_MIN" ] || { echo 'sports: too few channels' >&2; exit 1; }
+    grep -qE "$SP_REQ" "$SANSP" || { echo 'sports: missing required pattern' >&2; exit 1; }
+    filter_stage "$SANSP" "$FILTSP" "$STAT_SP" "$SP_BL" "$SP_GS" 0 1
+    read -r sp_blk sp_sib sp_blo sp_dpb sp_grp < "$STAT_SP"
+    s_black=''${sp_blk#blacklist=}
+    s_grp=''${sp_grp#group=}
+    s_kept=$(grep -c '^#EXTINF' "$FILTSP")
+    rm -f "$TMPSP" "$SANSP" "$STAT_SP"; TMPSP=""; SANSP=""; STAT_SP=""
+  }
+
+  # 所有基础模式只在此发布：先完成体育源，再加单个状态行，最后同目录原子替换。
+  publish_output() {
+    local candidate="$1"
+    if [ "$SPORTS" = "1" ]; then
+      sports_stage
+      tail -n +2 "$FILTSP" >> "$candidate"
+      rm -f "$FILTSP"; FILTSP=""
+      UPD="$UPD sports=${sportsSourceLabel} sports_kept=$s_kept sports_filtered_out:blacklist=$s_black group=$s_grp"
+    fi
+    UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c '^#EXTINF' "$candidate") $UPD"
+    { head -n1 "$candidate"; echo "$UPD"; tail -n +2 "$candidate"; } > "$candidate.hdr"
+    mv -f "$candidate.hdr" "$candidate"
+    chmod 644 "$candidate"
+    mv -f "$candidate" "$DST"
   }
 
   # ---- merge（both / fcc 补充、移动 filter 成功后）：单 awk 两文件趟（NR==FNR 第一趟建主源键集）----
@@ -411,10 +471,8 @@ writeShellScriptBin "iptv-merge" ''
     # 3) 头部追加 # updated 时间注释（紧随 #EXTM3U；原头行 + filtered_out 后缀；channels= 为过滤后计数）
     #    date 格式字面锁死 %FT%TZ=[0-9T:-Z]，channels 与四计数(block/sibling/blacklist/group)均纯数字
     #    → 插行文本注入面为空【审查 S9】；勿改成 %c/%Z 类可变格式
-    UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c "^#EXTINF" "$TMP") src=${telecomSourceLabel} filtered_out:block=$n_block sibling=$n_sib blacklist=$n_black group=$n_grp"
-    { head -n1 "$TMP"; echo "$UPD"; tail -n +2 "$TMP"; } > "$TMP.hdr" && mv -f "$TMP.hdr" "$TMP"
-    chmod 644 "$TMP"
-    mv -f "$TMP" "$DST"
+    UPD="src=${telecomSourceLabel} filtered_out:block=$n_block sibling=$n_sib blacklist=$n_black group=$n_grp"
+    publish_output "$TMP"
     TMP=""
   }
   # ---- 组播阶段（带 udpxy 参数下载、校验、过滤）----
@@ -426,7 +484,7 @@ writeShellScriptBin "iptv-merge" ''
 
     FILTMC=$(mktemp "''${DST%/*}/.iptv-mcfilt.XXXXXX")
     STAT_MC=$(mktemp "''${DST%/*}/.iptv-mcstats.XXXXXX")
-    filter_stage "$TMPMC" "$FILTMC" "$STAT_MC" "$MC_BL" "$MC_GS" 0
+    filter_stage "$TMPMC" "$FILTMC" "$STAT_MC" "$MC_BL" "$MC_GS" 0 0
     read -r mc_blk mc_sib mc_blo mc_dpb mc_grp < "$STAT_MC"
     n_mc_black=''${mc_blk#blacklist=}
     n_mc_sib=''${mc_sib#sibling=}
@@ -440,10 +498,8 @@ writeShellScriptBin "iptv-merge" ''
   }
 
   publish_multicast() {
-    UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c "^#EXTINF" "$TMPMC") src=${multicastSourceLabel} udpxy=''${UDPXY:-none} filtered_out:block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black group=$n_mc_grp"
-    { head -n1 "$TMPMC"; echo "$UPD"; tail -n +2 "$TMPMC"; } > "$TMPMC.hdr" && mv -f "$TMPMC.hdr" "$TMPMC"
-    chmod 644 "$TMPMC"
-    mv -f "$TMPMC" "$DST"
+    UPD="src=${multicastSourceLabel} udpxy=''${UDPXY:-none} filtered_out:block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black group=$n_mc_grp"
+    publish_output "$TMPMC"
     TMPMC=""
   }
   # FCC 只变换已过滤的主源 URL；移动源尚未合并，转换失败则不发布。
@@ -514,10 +570,8 @@ writeShellScriptBin "iptv-merge" ''
       m_grp=''${fm_grp#group=}
       rm -f "$STAT_M"; STAT_M=""
       rm -f "$TMPM" "$SANM"; TMPM=""; SANM=""  # 下载/净化中间件即清（trap 兜底残量）
-      UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c "^#EXTINF" "$FILTM") src=${mobileSourceLabel} filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
-      { head -n1 "$FILTM"; echo "$UPD"; tail -n +2 "$FILTM"; } > "$FILTM.hdr" && mv -f "$FILTM.hdr" "$FILTM"
-      chmod 644 "$FILTM"
-      mv -f "$FILTM" "$DST"
+      UPD="src=${mobileSourceLabel} filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
+      publish_output "$FILTM"
       FILTM=""
       echo "mobile-filter: filtered_out block=$m_block sibling=$m_sib blacklist=$m_black dp3=$m_dp3 group=$m_grp"
       ;;
@@ -567,10 +621,8 @@ writeShellScriptBin "iptv-merge" ''
         rm -f "$TMP" "$FILTM"; TMP=""; FILTM=""  # 两源已被 MRG 吸收（trap 兜底残量）
         # ---- both 头部 # updated（单个 #EXTM3U 头=电信头行；channels= 最终文件 EXTINF 计数）----
         #     注入面纪律同审查 S9: date 锁 %FT%TZ、计数纯数字
-        UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c "^#EXTINF" "$MRG") src=${telecomSourceLabel}+${mobileSourceLabel} merged=+$n_kept telecom_filtered_out:block=$n_block sibling=$n_sib blacklist=$n_black group=$n_grp mobile_filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
-        { head -n1 "$MRG"; echo "$UPD"; tail -n +2 "$MRG"; } > "$MRG.hdr" && mv -f "$MRG.hdr" "$MRG"
-        chmod 644 "$MRG"
-        mv -f "$MRG" "$DST"
+        UPD="src=${telecomSourceLabel}+${mobileSourceLabel} merged=+$n_kept telecom_filtered_out:block=$n_block sibling=$n_sib blacklist=$n_black group=$n_grp mobile_filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
+        publish_output "$MRG"
         MRG=""
         # ---- journal 单行: 电信行 + 空格 + mobile-filter 片段 + 空格 + merge 片段 ----
         echo "filter: filtered_out block=$n_block sibling=$n_sib blacklist=$n_black dp3=$n_dp3 group=$n_grp mobile-filter: filtered_out block=$m_block sibling=$m_sib blacklist=$m_black dp3=$m_dp3 group=$m_grp merge: mobile_kept=+$n_kept telecom_kept=$n_tck mobile_total=$n_m0 dedup=$n_ded merged_dup=$n_dup"
@@ -626,10 +678,8 @@ writeShellScriptBin "iptv-merge" ''
           n_dup=''${gm_dup#merged_dup=}
           rm -f "$STAT_MG"; STAT_MG=""
           rm -f "$TMPMC" "$FILTM"; TMPMC=""; FILTM=""
-          UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c "^#EXTINF" "$MRG") src=${multicastSourceLabel}+${mobileSourceLabel} udpxy=$UDPXY merged=+$n_kept multicast_filtered_out:block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black group=$n_mc_grp mobile_filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
-          { head -n1 "$MRG"; echo "$UPD"; tail -n +2 "$MRG"; } > "$MRG.hdr" && mv -f "$MRG.hdr" "$MRG"
-          chmod 644 "$MRG"
-          mv -f "$MRG" "$DST"
+          UPD="src=${multicastSourceLabel}+${mobileSourceLabel} udpxy=$UDPXY merged=+$n_kept multicast_filtered_out:block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black group=$n_mc_grp mobile_filtered_out:block=$m_block sibling=$m_sib blacklist=$m_black group=$m_grp"
+          publish_output "$MRG"
           MRG=""
           echo "fcc-filter: filtered_out block=$n_mc_block sibling=$n_mc_sib blacklist=$n_mc_black dp3=$n_mc_dp3 group=$n_mc_grp mobile-filter: filtered_out block=$m_block sibling=$m_sib blacklist=$m_black dp3=$m_dp3 group=$m_grp merge: mobile_kept=+$n_kept multicast_kept=$n_tck mobile_total=$n_m0 dedup=$n_ded merged_dup=$n_dup"
         fi

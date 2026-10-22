@@ -47,6 +47,16 @@ MOBILE_PAIRS = {
     "last": ('#EXTINF:-1 group-title="Extra",Mobile Last\n',
              "http://mobile.example:4022/udp/239.20.0.1:1234?token=original#track"),
 }
+SPORTS_PAIRS = {
+    "guide": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Guide",Github「使用说明」\n',
+              "https://sports.example/hosts.txt?format=m3u#guide"),
+    "first": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" tvg-logo="https://logo.example/sports,preview.png" group-title="Sport",News\n',
+              "https://sports.example//index.m3u8?token=a%26b&fcc=provider%3A9000&fcc-type=source#main"),
+    "blacklisted": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Sport",睛彩竞技\n',
+                    "https://sports.example/excluded.m3u8?token=original"),
+    "last": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Sport",News标清\n',
+             "http://sports.example:4022/udp/239.30.0.2:1234?token=second&fcc=original#track"),
+}
 
 
 def playlist(pairs, header=HEADER):
@@ -64,7 +74,7 @@ def expected_primary_fcc():
     ])
 
 
-def expected_supplemented(strategy, mobile_filters):
+def expected_supplemented(strategy, mobile_filters, fcc=True):
     # Explicit fixture outcomes; do not duplicate the program's normalization/filter algorithms.
     accepted = {
         "smart": ["first", "blacklisted", "group-dropped", "cctv-4k", "last"],
@@ -73,9 +83,14 @@ def expected_supplemented(strategy, mobile_filters):
     }[strategy]
     if mobile_filters:
         accepted = [key for key in accepted if key not in ("blacklisted", "group-dropped")]
-    return expected_primary_fcc() + playlist(
+    return (expected_primary_fcc() if fcc else playlist(PRIMARY_PAIRS)) + playlist(
         [MOBILE_PAIRS[key] for key in accepted], header="",
     )
+
+
+def expected_sports(sports_filters):
+    accepted = ["first", "last"] if sports_filters else list(SPORTS_PAIRS)
+    return playlist([SPORTS_PAIRS[key] for key in accepted], header="")
 
 
 def source(gateway):
@@ -128,6 +143,10 @@ def main():
         "--mobile-filters", action="store_true",
         help='expect mobileBlacklist=["BLOCKED CANDIDATE"] and mobileDropGroups=["Excluded"]',
     )
+    parser.add_argument(
+        "--sports-filters", action="store_true",
+        help='expect sportsBlacklist=["睛彩", "说明"] (neutral sports defaults otherwise)',
+    )
     args = parser.parse_args()
     executable = args.executable.resolve()
     if not executable.is_file() or not os.access(executable, os.X_OK):
@@ -157,6 +176,15 @@ def main():
             ('#EXTINF:-1 group-title="Extra",Only\n', "https://mobile.example/only.m3u8"),
             ('#EXTINF:-1 group-title="Extra",Only标清\n', "https://mobile.example/only-sd.m3u8"),
         ]),
+        "/sports.m3u": playlist(
+            SPORTS_PAIRS.values(),
+            header='#EXTM3U x-tvg-url="https://sports.example/guide.xml"\n\n# upstream sports comment\n',
+        ) + "\n",
+        "/sports-bad-header.m3u": playlist(SPORTS_PAIRS.values(), header="not an M3U\n"),
+        "/sports-empty.m3u": HEADER,
+        "/sports-unpaired.m3u": playlist([SPORTS_PAIRS["first"]]) + SPORT,
+        "/sports-invalid-name.m3u": HEADER + '#EXTINF:-1 tvg-name="咪咕体育"\nhttps://sports.example/no-name.m3u8\n',
+        "/sports-no-survivors.m3u": playlist([SPORTS_PAIRS["guide"], SPORTS_PAIRS["blacklisted"]]),
         **malformed,
     }
 
@@ -263,13 +291,82 @@ def main():
             assert playlist_content(destination) == expected_legacy()
 
             def preserves_output(settings, config_failure=False):
-                saved = b"#EXTM3U\n# existing destination must survive a failed sync\n"
+                saved = b'#EXTM3U\n#EXTINF:-1 tvg-id="old",Existing channel\nhttps://old.example/complete.m3u8?token=saved\n'
                 destination.write_bytes(saved)
                 request_count = len(requests)
                 run(settings, False)
                 assert destination.read_bytes() == saved
                 if config_failure:
                     assert len(requests) == request_count, "invalid config reached the network"
+
+            mobile_keys = [
+                key for key in MOBILE_PAIRS
+                if not args.mobile_filters or key not in ("blacklisted", "group-dropped")
+            ]
+            mobile_only = playlist(
+                [MOBILE_PAIRS[key] for key in mobile_keys],
+                header='#EXTM3U x-tvg-url="https://mobile.example/guide.xml"\n',
+            )
+            sports_outputs = []
+            # Compare complete consumer playlists in every base mode. The sports pairs share
+            # tvg-id/name and overlap the base display name; neither smart merge nor sibling
+            # suppression may collapse them, and FCC must never touch their original URLs.
+            for mode, include_mobile, expected_base in (
+                ("telecom-only", False, playlist(PRIMARY_PAIRS)),
+                ("mobile-only", False, mobile_only),
+                ("both", False, expected_supplemented(args.strategy, args.mobile_filters, fcc=False)),
+                ("multicast", False, expected_legacy()),
+                ("fcc", False, expected_fcc("huawei")),
+                ("fcc", True, expected_supplemented(args.strategy, args.mobile_filters)),
+            ):
+                settings = environment.copy()
+                settings.update({
+                    "IPTV_MODE": mode,
+                    "IPTV_SRC": upstream + "/primary.m3u",
+                    "IPTV_SRC_MOBILE": upstream + "/mobile.m3u",
+                    "IPTV_SRC_MULTICAST": upstream + ("/primary.m3u" if include_mobile else "/valid.m3u?feed=fixture"),
+                    "IPTV_SRC_SPORTS": upstream + "/sports.m3u?auth=source%26token",
+                    "IPTV_FCC_INCLUDE_MOBILE": "1" if include_mobile else "0",
+                    "IPTV_SPORTS": "0",
+                })
+                request_count = len(requests)
+                run(settings, True)
+                assert playlist_content(destination) == expected_base
+                assert not any(
+                    path.startswith("/sports") for path in requests[request_count:]
+                ), f"disabled sports reached the network in {mode}"
+
+                settings["IPTV_SPORTS"] = "1"
+                run(settings, True)
+                assert playlist_content(destination) == expected_base + expected_sports(args.sports_filters)
+                assert sum(
+                    line.startswith("#EXTM3U") for line in destination.read_text().splitlines()
+                ) == 1
+                sports_outputs.append(settings)
+
+                broken = settings.copy()
+                broken["IPTV_SRC_SPORTS"] = upstream + "/sports-bad-header.m3u"
+                preserves_output(broken)
+
+            # Exercise all sports failure gates against the combined FCC + mobile output.
+            # No intermediate primary or primary+mobile list may replace the old destination.
+            sports_failures = [
+                "/sports-missing.m3u", "/sports-empty.m3u",
+                "/sports-unpaired.m3u", "/sports-invalid-name.m3u",
+            ]
+            if args.sports_filters:
+                sports_failures.append("/sports-no-survivors.m3u")
+            for route in sports_failures:
+                settings = sports_outputs[-1].copy()
+                settings["IPTV_SRC_SPORTS"] = upstream + route
+                preserves_output(settings)
+
+            sports_fallback = sports_outputs[-1].copy()
+            sports_fallback["IPTV_SRC_MOBILE"] = upstream + "/mobile-bad-header.m3u"
+            run(sports_fallback, True)
+            assert playlist_content(destination) == expected_primary_fcc() + expected_sports(args.sports_filters)
+            sports_fallback["IPTV_SRC_SPORTS"] = upstream + "/sports-bad-header.m3u"
+            preserves_output(sports_fallback)
 
             invalid_config = [
                 ("IPTV_FCC_GATEWAY", None),
@@ -288,6 +385,9 @@ def main():
                 ("IPTV_FCC_INCLUDE_MOBILE", ""),
                 ("IPTV_FCC_INCLUDE_MOBILE", "true"),
                 ("IPTV_FCC_INCLUDE_MOBILE", "2"),
+                ("IPTV_SPORTS", ""),
+                ("IPTV_SPORTS", "true"),
+                ("IPTV_SPORTS", "2"),
             ]
             for key, value in invalid_config:
                 settings = environment.copy()
@@ -306,7 +406,9 @@ def main():
             print(
                 f"PASS: FCC conversion/query preservation, {args.strategy} mobile supplementation "
                 f"(configured filters={args.mobile_filters}), unchanged mobile URLs/source order, "
-                "mobile failure fallback, legacy multicast, invalid config and malformed-source atomic preservation"
+                "mobile failure fallback, additive sports in all five modes including FCC+mobile "
+                f"(configured sports filters={args.sports_filters}), disabled sports without fetching, "
+                "sports failure atomic preservation, legacy multicast, invalid config and malformed sources"
             )
     finally:
         server.shutdown()
