@@ -50,7 +50,7 @@ in
 
     environmentFile = lib.mkOption {
       type = lib.types.str;
-      description = "Path to a private EnvironmentFile supplying OMP_WEB_PASSWORD.";
+      description = "Path to a private EnvironmentFile supplying OMP_WEB_PASSWORD_HASH (scrypt).";
     };
   };
 

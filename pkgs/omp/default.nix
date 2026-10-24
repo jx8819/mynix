@@ -33,7 +33,7 @@ let
 in
 stdenv.mkDerivation (finalAttrs: {
   pname = "omp";
-  version = "18.11.0";
+  version = "18.12.6";
 
   strictDeps = true;
   __structuredAttrs = true;
@@ -42,13 +42,13 @@ stdenv.mkDerivation (finalAttrs: {
     owner = "can1357";
     repo = "oh-my-pi";
     # 与现网部署的 omp 保持同源 pin。
-    rev = "d0b56045fff4367a23d839bf8250d49c05486566";
-    hash = "sha256-YNPG9fDkEa+wKLip2q0mV9enBJAQUEeZH/M7UVGCqQ4=";
+    rev = "45c35e40c46166dc726ccc52f5d27f40f2449f99";
+    hash = "sha256-Vx+zWGb0z/IgIFLbCv/gvK7iQobbKIkA1DhCjsYIm6o=";
   };
 
   cargoDeps = rustPlatform.fetchCargoVendor {
     inherit (finalAttrs) src;
-    hash = "sha256-j/4POlwE819bZHvlO8UsQNGUPzG/RblP4R8nhSv0AjU=";
+    hash = "sha256-BTZP9pZ18s8K77P+XJ4IQyKtVyy06Xhd3KnDvaBog2s=";
   };
 
   postPatch = ''

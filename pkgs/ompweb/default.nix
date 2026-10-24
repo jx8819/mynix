@@ -1,10 +1,10 @@
 # ompweb — OMP 编码代理 Web UI（上游 release tarball 打包）。
-# 上游只发编译后的 .next 产物、不带 node_modules，生产依赖图由随包的上游原版
-# package-lock.json 钉住；node_modules 用 importNpmLock 离线重建。
+# 上游 release 不带 node_modules，生产依赖图由对应 release 精确上游 commit 的
+# 原版 package-lock.json 钉住；node_modules 用 importNpmLock 离线重建。
 { lib, stdenv, nodejs, makeWrapper, fetchurl, importNpmLock }:
 
 let
-  version = "0.5.1";
+  version = "0.5.2";
   lock = builtins.fromJSON (builtins.readFile ./package-lock.json);
   # 临时 manifest 只用于装依赖；Nix derivation 名不能含 @ 和 /，故用无 scope 名字。
   package = {
@@ -39,7 +39,7 @@ stdenv.mkDerivation {
 
   src = fetchurl {
     url = "https://registry.npmjs.org/@kahme247/ompweb/-/ompweb-${version}.tgz";
-    hash = "sha256-gJxLsmGpH9R1TSd6c8dShRFdP3jfVizUgJgvAHjP4nI=";
+    hash = "sha256-YiP8JshiXqxCYDpqXc6i1W6/nOGK0EBfkd8u/S9Hups=";
   };
 
   nativeBuildInputs = [ makeWrapper ];

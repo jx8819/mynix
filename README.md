@@ -8,6 +8,21 @@ Nix 软件包与 NixOS 模块。
 
 源码见 `pkgs/`、`modules/`；输出清单以 `flake.nix` 为准。部分包需要 `allowUnfree`。
 
+## OMP 与 ompweb
+
+`omp` 固定到上游稳定版 **18.12.6** 的源码提交，Rust 与 Bun 依赖均由固定输出哈希锁定；
+`ompweb` 固定到 npm 发布版 **0.5.2**，使用该发布记录 `gitHead` 对应的上游原版
+`package-lock.json` 重建生产依赖（npm tarball 不包含 lock 文件）。
+
+```sh
+nix build .#omp .#ompweb
+```
+
+ompweb 0.5.2 不再接受明文 `OMP_WEB_PASSWORD`。`services.ompweb.environmentFile`
+必须提供 `OMP_WEB_PASSWORD_HASH`，值由同版上游 `hash-password` 工具生成，格式为
+`scrypt$…`。哈希也应由消费仓库的 SOPS 等机制在运行时注入，不写入 Nix store；
+从原密码生成哈希无需更改用户的登录密码。
+
 ## IPTV 多模式同步与 FCC
 
 `nixosModules.iptv-merge` 的过滤/发布程序位于 `pkgs/iptv-merge`。每个
