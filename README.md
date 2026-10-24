@@ -14,6 +14,14 @@ Nix 软件包与 NixOS 模块。
 `ompweb` 固定到 npm 发布版 **0.5.2**，使用该发布记录 `gitHead` 对应的上游原版
 `package-lock.json` 重建生产依赖（npm tarball 不包含 lock 文件）。
 
+OMP 的构建、依赖安装与启动均要求 **Bun >= 1.3.14**，保留上游最低版本校验，不再通过补丁屏蔽。
+若消费方 Nixpkgs 的 Bun 已达标则直接复用；否则仅在 OMP 包内复用 Nixpkgs 的 Bun 打包配方，
+使用官方 **1.3.14 x86_64-linux** 发布包及固定哈希，不替换系统或其他服务的 Bun，也不更新全局 Nixpkgs。
+Bun 1.3.13 存在并发文件流误关 TTY stdin 的缺陷，详见 [Bun 1.3.14 修复说明](https://bun.com/blog/bun-v1.3.14)
+和 [上游问题 #30565](https://github.com/oven-sh/bun/issues/30565)。隔离真实 PTY、保持 master 打开的版本对照中，
+同一份 OMP `ProcessTerminal` 在 1.3.13 下因假 EOF 自发 SIGHUP、退出码 129；1.3.14 保持 raw 输入可读。
+本修复不忽略 EOF 或 SIGHUP；真实终端断开时仍保留上游退出行为。
+
 ```sh
 nix build .#omp .#ompweb
 ```

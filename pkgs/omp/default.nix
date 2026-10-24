@@ -5,6 +5,7 @@
   lib,
   stdenv,
   fetchFromGitHub,
+  fetchurl,
   bun,
   cargo,
   rustc,
@@ -24,6 +25,24 @@
   pipewireSupport ? true,
 }:
 let
+  # CLI 与 workspace engines 要求 Bun >=1.3.14；只覆盖本包的运行时，不改全局 Bun。
+  minimumBunVersion = "1.3.14";
+  ompBun =
+    if lib.versionAtLeast bun.version minimumBunVersion then
+      bun
+    else
+      bun.overrideAttrs (finalAttrs: _previousAttrs: {
+        version = minimumBunVersion;
+        # 复用 Nixpkgs 的解压、autoPatchelf 和安装配方；仅提供已固定哈希的平台。
+        passthru.sources = {
+          x86_64-linux = fetchurl {
+            url = "https://github.com/oven-sh/bun/releases/download/bun-v${finalAttrs.version}/bun-linux-x64.zip";
+            hash = "sha256-lR7iruhV8IWVruxiJSJqKY0/6oOj3NZGXAnLzN9+hI8=";
+          };
+        };
+        src = finalAttrs.passthru.sources.${stdenv.hostPlatform.system};
+      });
+
   addonName =
     let
       inherit (stdenv.hostPlatform) node isx86_64;
@@ -51,18 +70,13 @@ stdenv.mkDerivation (finalAttrs: {
     hash = "sha256-BTZP9pZ18s8K77P+XJ4IQyKtVyy06Xhd3KnDvaBog2s=";
   };
 
-  postPatch = ''
-    substituteInPlace packages/coding-agent/src/cli.ts \
-      --replace-fail 'if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0)' 'if (false)'
-  '';
-
   # node_modules 单独做固定输出：绕开 nixpkgs 里 bun 构建依赖的已知缺陷。
   node_modules = stdenv.mkDerivation {
     pname = "${finalAttrs.pname}-node_modules";
     inherit (finalAttrs) version src;
 
     nativeBuildInputs = [
-      bun
+      ompBun
       writableTmpDirAsHomeHook
     ];
 
@@ -98,7 +112,7 @@ stdenv.mkDerivation (finalAttrs: {
   };
 
   nativeBuildInputs = [
-    bun
+    ompBun
     cargo
     cmake
     installShellFiles
@@ -184,7 +198,7 @@ stdenv.mkDerivation (finalAttrs: {
     } \) -exec rm -rf {} +
     find $out/lib/omp/node_modules -type f -name '*.exe' -delete
 
-    makeWrapper "${lib.getExe bun}" "$out/bin/omp" --add-flags "$out/lib/omp/packages/coding-agent/dist/cli.js"
+    makeWrapper "${lib.getExe ompBun}" "$out/bin/omp" --add-flags "$out/lib/omp/packages/coding-agent/dist/cli.js"
 
     runHook postInstall
   '';
@@ -209,6 +223,6 @@ stdenv.mkDerivation (finalAttrs: {
     homepage = "https://omp.sh";
     license = lib.licenses.mit;
     mainProgram = "omp";
-    platforms = lib.platforms.linux;
+    platforms = lib.intersectLists lib.platforms.linux ompBun.meta.platforms;
   };
 })
