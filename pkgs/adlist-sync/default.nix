@@ -40,6 +40,8 @@ EOF
       rm -f "$tmp"
       continue
     fi
+    # mktemp 固定创建 0600，UMask=0022 不会放宽；发布前显式允许 Web 服务读取。
+    chmod 0644 "$tmp"
     mv "$tmp" "$OUT/$name.txt"
     echo "OK: $name -> $OUT/$name.txt ($lines valid lines)"
     ok=$((ok+1))
