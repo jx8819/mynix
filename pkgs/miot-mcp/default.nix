@@ -145,6 +145,8 @@ py.buildPythonApplication {
     rev = "ea7aee35aa99092f9e56be667ace1226872f5728";
     hash = "sha256-umH+MIL/7VVVDw9HPe+R2AQozG8dj5d2f3VkZpZSYDE=";
   };
+  patches = [ ./json-string-properties.patch ];
+
   # QR ASCII 兜底走 stderr，不混进 MCP stdout。
   postPatch = ''
     substituteInPlace adapter/mijia_adapter.py \

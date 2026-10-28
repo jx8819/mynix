@@ -1,0 +1,183 @@
+diff --git a/README.md b/README.md
+index 7cb8613..ff92a66 100644
+--- a/README.md
++++ b/README.md
+@@ -42,6 +42,8 @@
+ - `set_fan_speed`
+ - `set_cover_position`
+ 
++使用 `control_device(operation="set_property")` 写入内容为 JSON 的 MIOT `string` 属性时，正常传入 JSON 文本，例如 `{"start_time":"22:30","end_time":"07:00"}`，不要再添加一层引号或重复 JSON 编码。服务会根据目标属性的实际类型，将 FastMCP 预解析出的对象或数组还原为 JSON 文本；普通字符串及非字符串属性仍沿用原有处理。
++
+ ### 场景与耗材
+ - `list_scenes`
+ - `execute_scene`
+diff --git a/README_EN.md b/README_EN.md
+index e1e3e17..ea0c185 100644
+--- a/README_EN.md
++++ b/README_EN.md
+@@ -42,6 +42,8 @@ A productized Mijia MCP server built on top of `mijiaAPI 3.x`. Clients do not ne
+ - `set_fan_speed`
+ - `set_cover_position`
+ 
++For MIOT `string` properties containing JSON, pass normal JSON text to `control_device(operation="set_property")`, for example `{"start_time":"22:30","end_time":"07:00"}`. Do not add outer quotes or JSON-encode it twice. Using the target property's actual type, the server restores objects or arrays pre-parsed by FastMCP to JSON text; ordinary strings and non-string properties retain their existing behavior.
++
+ ### Scenes and Consumables
+ - `list_scenes`
+ - `execute_scene`
+diff --git a/adapter/mijia_adapter.py b/adapter/mijia_adapter.py
+index 2839854..574e050 100644
+--- a/adapter/mijia_adapter.py
++++ b/adapter/mijia_adapter.py
+@@ -5,6 +5,7 @@ from mijiaAPI import mijiaAPI, mijiaDevice
+ from config.mijia_config import load_mijia_config, MijiaConfig
+ from utils.logger import get_logger
+ from utils.auth_manager import AuthDataManager
++import json
+ import subprocess
+ import sys
+ import traceback
+@@ -980,6 +981,11 @@ class MijiaAdapter:
+         """Set device property value by logical property name."""
+         device = self._get_device(device_id)
+         try:
++            if isinstance(value, (dict, list)):
++                prop = device.prop_list.get(property_name)
++                if prop is not None and prop.type == "string":
++                    # FastMCP may pre-parse JSON text in Any arguments.
++                    value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+             device.set(property_name, value)
+             _LOGGER.info(f"Successfully set property {property_name} = {value} (device: {device_id})")
+             return True
+diff --git a/tests/test_json_string_properties.py b/tests/test_json_string_properties.py
+new file mode 100644
+index 0000000..834238b
+--- /dev/null
++++ b/tests/test_json_string_properties.py
+@@ -0,0 +1,127 @@
++"""Exercise FastMCP argument parsing through the adapter and real MIOT validation."""
++import json
++import unittest
++from unittest.mock import Mock
++
++from mcp.server.fastmcp.utilities.func_metadata import func_metadata
++from mijiaAPI.devices import DevProp, mijiaDevice
++
++from adapter.mijia_adapter import MijiaAdapter
++
++
++class JsonStringPropertyTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        # Bypass discovery/login, but retain the SDK's actual property setter.
++        self.api = Mock(spec=["set_devices_prop"])
++        self.api.set_devices_prop.return_value = {"code": 0}
++        self.device = mijiaDevice.__new__(mijiaDevice)
++        self.device.api = self.api
++        self.device.did = "fixture-camera"
++        self.device.name = "Fixture camera"
++        self.device.sleep_time = 0
++        self.device.prop_list = {}
++        for name, prop_type, piid in [
++            ("enable-time-period", "string", 2),
++            ("enabled", "bool", 4),
++            ("sensitivity", "uint", 5),
++            ("threshold", "float", 6),
++        ]:
++            prop = DevProp({
++                "name": name,
++                "description": name,
++                "type": prop_type,
++                "rw": "rw",
++                "range": None,
++                "method": {"siid": 24, "piid": piid},
++            })
++            self.device.prop_list[name] = prop
++            self.device.prop_list[name.replace("-", "_")] = prop
++        self.adapter = MijiaAdapter.__new__(MijiaAdapter)
++        self.adapter._connected = True
++        self.adapter._devices = {self.device.did: self.device}
++        self.metadata = func_metadata(self.adapter.set_property_value_by_name)
++
++    async def call_through_fastmcp(self, value, property_name="enable-time-period"):
++        return await self.metadata.call_fn_with_arg_validation(
++            self.adapter.set_property_value_by_name,
++            fn_is_async=True,
++            arguments_to_validate={
++                "device_id": self.device.did,
++                "property_name": property_name,
++                "value": value,
++            },
++            arguments_to_pass_directly=None,
++        )
++
++    async def test_json_object_text_reaches_miot_without_outer_quotes(self):
++        text = '{"start_time":"22:30","end_time":"07:00"}'
++        self.assertIsInstance(self.metadata.pre_parse_json({"value": text})["value"], dict)
++        self.assertTrue(await self.call_through_fastmcp(text))
++        self.api.set_devices_prop.assert_called_once_with({
++            "did": self.device.did,
++            "siid": 24,
++            "piid": 2,
++            "value": text,
++        })
++        # Decoding once must yield an object, not another quoted JSON string.
++        self.assertEqual(json.loads(self.api.set_devices_prop.call_args.args[0]["value"]), {
++            "start_time": "22:30", "end_time": "07:00",
++        })
++
++    async def test_json_array_and_object_values_use_string_property_metadata(self):
++        for value, expected in [
++            ('["夜间",{"enabled":true}]', '["夜间",{"enabled":true}]'),
++            ({"start_time": "22:30", "end_time": "07:00"},
++             '{"start_time":"22:30","end_time":"07:00"}'),
++            (["night", {"enabled": False}], '["night",{"enabled":false}]'),
++        ]:
++            with self.subTest(value=value):
++                self.api.set_devices_prop.reset_mock()
++                await self.call_through_fastmcp(value, "enable_time_period")
++                self.assertEqual(self.api.set_devices_prop.call_args.args[0]["value"], expected)
++
++    async def test_existing_strings_are_not_encoded_again(self):
++        for value in ["night", "", "123", "true", '{ "start_time": "22:30" }']:
++            with self.subTest(value=value):
++                self.api.set_devices_prop.reset_mock()
++                await self.adapter.set_property_value_by_name(
++                    self.device.did, "enable-time-period", value,
++                )
++                self.assertEqual(self.api.set_devices_prop.call_args.args[0]["value"], value)
++
++    async def test_invalid_string_scalars_still_fail_sdk_validation(self):
++        for value in [None, True, 123, 1.5]:
++            with self.subTest(value=value):
++                self.api.set_devices_prop.reset_mock()
++                with self.assertRaises(ValueError):
++                    await self.adapter.set_property_value_by_name(
++                        self.device.did, "enable-time-period", value,
++                    )
++                self.api.set_devices_prop.assert_not_called()
++
++    async def test_non_string_properties_retain_sdk_coercion(self):
++        for name, value, expected in [
++            ("enabled", False, False),
++            ("enabled", "true", True),
++            ("sensitivity", "2", 2),
++            ("threshold", "1.5", 1.5),
++        ]:
++            with self.subTest(name=name, value=value):
++                self.api.set_devices_prop.reset_mock()
++                await self.call_through_fastmcp(value, name)
++                actual = self.api.set_devices_prop.call_args.args[0]["value"]
++                self.assertEqual(actual, expected)
++                self.assertIs(type(actual), type(expected))
++
++    async def test_structured_values_remain_invalid_for_non_string_properties(self):
++        for name in ["enabled", "sensitivity", "threshold"]:
++            for value in [{"enabled": True}, [1, 2]]:
++                with self.subTest(name=name, value=value):
++                    self.api.set_devices_prop.reset_mock()
++                    with self.assertRaises((TypeError, ValueError)):
++                        await self.call_through_fastmcp(value, name)
++                    self.api.set_devices_prop.assert_not_called()
++
++
++if __name__ == "__main__":
++    unittest.main()
