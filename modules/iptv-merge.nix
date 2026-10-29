@@ -33,7 +33,7 @@ let
   };
 
   servicePath = [ pkgs.bash pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.coreutils ];
-  # 五个基础模式保留原单元名；体育补充输出使用独立服务与定时器。
+  # 未命名输出保留原单元名；命名实例与体育变体共用同一套服务和定时器。
   unitNames = {
     both = "iptv-sync";
     "telecom-only" = "iptv-telecom-sync";
@@ -42,8 +42,11 @@ let
     fcc = "iptv-fcc-sync";
   };
   unitName = output:
-    let base = unitNames.${output.mode};
-    in if output.sports then "${lib.removeSuffix "-sync" base}-sports-sync" else base;
+    let
+      base = lib.removeSuffix "-sync" unitNames.${output.mode};
+      instance = lib.optionalString (output.name != null) "-${output.name}";
+      sports = lib.optionalString output.sports "-sports";
+    in "${base}${instance}${sports}-sync";
 
   mkServiceConfig = outputPath: {
     Type = "oneshot";
@@ -80,6 +83,15 @@ in
     outputs = mkOption {
       type = types.listOf (types.submodule {
         options = {
+          name = mkOption {
+            type = types.nullOr (types.strMatching "[a-z0-9]+(-[a-z0-9]+)*");
+            default = null;
+            description = ''
+              可选稳定实例标识：小写英文字母或数字，以单个连字符分段。
+              插入基础单元名与 sports/sync 后缀之间；null 保留原命名。
+              最终完整 service 单元名不得超过 255 字节，且不能与其他输出重名。
+            '';
+          };
           mode = mkOption {
             type = types.enum [ "both" "telecom-only" "mobile-only" "multicast" "fcc" ];
             description = "合并模式：both / telecom-only / mobile-only / multicast / fcc（独立的 rtp2httpd FCC 列表）。";
@@ -326,7 +338,11 @@ in
     assertions = [
       {
         assertion = lib.length (lib.unique (map unitName cfg.outputs)) == lib.length cfg.outputs;
-        message = "services.iptv-merge.outputs must have unique mode + sports combinations";
+        message = "services.iptv-merge.outputs must generate unique systemd unit names (including instance names and sports suffixes)";
+      }
+      {
+        assertion = lib.all (output: builtins.stringLength "${unitName output}.service" <= 255) cfg.outputs;
+        message = "services.iptv-merge.outputs must generate systemd service names no longer than 255 bytes";
       }
       {
         assertion = lib.length (lib.unique (map (output: output.outputPath) cfg.outputs)) == lib.length cfg.outputs;

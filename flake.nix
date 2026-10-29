@@ -28,6 +28,8 @@
         adlist-sync = "default";
         # IPTV 播放列表过滤、合并与组播地址转换
         iptv-merge = "default";
+        # RTP/UDP、RTSP 与 HTTP IPTV 流代理
+        rtp2httpd = "default";
         # 小米 Mesh 有线组网恢复看门狗
         mesh-guardian = "default";
         # HDSky（hdsky.me）自动签到
