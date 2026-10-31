@@ -197,6 +197,25 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion =
+          !cfg.forceEncodingConfig
+          || (
+            !hasFields encodingScalars
+            && cfg.encoding.hardwareDecodingCodecs == null
+            && !hasFields serverScalars
+            && !hasFields networkScalars
+          );
+        message = ''
+          services.jellyfin.forceEncodingConfig rewrites encoding.xml wholesale on every
+          start and fights this module's field-level seeding (per-start backups, dropped
+          TranscodingTempPath). Use forceEncodingConfig = false with services.jellyfin.encoding.*,
+          or clear all managed fields and rely on the upstream template.
+        '';
+      }
+    ];
+
     # 冻结构建的 Jellyfin（fork 源码 + pin 死的 ffmpeg/web/工具链）是默认包；
     # 需要上游包时显式覆盖 services.jellyfin.package。
     services.jellyfin.package = lib.mkDefault pkgs.jellyfin-pinned;
