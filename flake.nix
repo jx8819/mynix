@@ -1,9 +1,13 @@
 {
   description = "Nix 软件包与 NixOS 模块。";
 
-  inputs.nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
+  inputs = {
+    nixpkgs.url = "github:nixos/nixpkgs/nixos-26.05";
+    # jellyfin-pinned 的构建基线：URL 内精确 rev 冻结，不随宿主 nixpkgs 升级
+    jellyfin-pin.url = "github:NixOS/nixpkgs/a033e66ab94a6bedf2c3d58d93a36319d3cbbbaf";
+  };
 
-  outputs = { self, nixpkgs }:
+  outputs = { self, nixpkgs, jellyfin-pin }:
     let
       system = "x86_64-linux";
 
@@ -54,13 +58,20 @@
         lume-agent = "default";
         # UDP-to-HTTP 组播转单播代理
         udpxy = "default";
+        # Jellyfin 10.11.z 冻结版（fork 源码 + pin 死的 ffmpeg/web/工具链）
+        jellyfin-pinned = "pinned";
       };
 
-      # 按清单构造包：每个键对应 ./pkgs/<键>，ddddocr 是 python 库走 python3.pkgs.callPackage。
+      # 冻结构建基线：来自 flake input jellyfin-pin（精确 rev），与宿主 nixpkgs 无关
+      pinnedPkgs = jellyfin-pin.legacyPackages.${system};
+
+      # 按清单构造包：每个键对应 ./pkgs/<键>，ddddocr 是 python 库走 python3.pkgs.callPackage，
+      # "pinned" 的构建基线走 pinnedPkgs，宿主 pkgs 只提供 fetcher。
       mkOverlay = final: prev:
         builtins.mapAttrs (name: variant: {
           default = prev.callPackage;
           python = prev.python3.pkgs.callPackage;
+          pinned = dir: args: prev.callPackage dir ({ inherit pinnedPkgs; } // args);
         }.${variant} (./pkgs + "/${name}") { }) packageList;
 
       pkgs = import nixpkgs {
@@ -98,6 +109,8 @@
       nixosModules.lume-agent = import ./modules/lume-agent.nix;
       # udpxy 组播转单播服务
       nixosModules.udpxy = import ./modules/udpxy.nix;
+      # Jellyfin 声明式配置扩展（托管 encoding/system/network 字段，默认包 jellyfin-pinned）
+      nixosModules.jellyfin = import ./modules/jellyfin.nix;
 
       # 包 overlay：消费方把它加进自己 nixpkgs.overlays，然后直接用 pkgs.<name>
       overlays.default = mkOverlay;
