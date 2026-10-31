@@ -1,5 +1,21 @@
 {
   "nodes": {
+    "jellyfin-pin": {
+      "locked": {
+        "lastModified": 1791883866,
+        "narHash": "sha256-yvkDdToRZ4IgPc9tSBzzCYJvTLf8n5eE3rgUkpCuD5A=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "a033e66ab94a6bedf2c3d58d93a36319d3cbbbaf",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "a033e66ab94a6bedf2c3d58d93a36319d3cbbbaf",
+        "type": "github"
+      }
+    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1791883866,
@@ -18,6 +34,7 @@
     },
     "root": {
       "inputs": {
+        "jellyfin-pin": "jellyfin-pin",
         "nixpkgs": "nixpkgs"
       }
     }
