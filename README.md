@@ -44,13 +44,55 @@ services.iptv-merge.outputs = [
 完整 service 单元名最长 255 字节。名称碰撞按最终结果检查：
 例如普通组播的 `name = "sports"` 会与未命名的体育组播输出冲突。
 
+### 英国频道清单辅助工具
+
+`pkgs.iptv-merge.ukPlaylist` 提供 `iptv-uk-sync`，在 US 上处理源清单，
+英国机器只提供出口 HTTP 代理。例如：
+
+```sh
+iptv-uk-sync \
+  --source https://iptv-org.github.io/iptv/countries/uk.m3u \
+  --output-dir /var/lib/iptv-uk \
+  --proxy http://uk-proxy.example:3128 \
+  --workers 4 --timeout 8 --min-height 720
+```
+
+`--workers`、`--timeout`、`--min-height` 的默认值分别为 4、8 秒、720。
+显式代理不受 `NO_PROXY` 绕过。筛选依据是实际抽样视频高度，不是频道名中的
+“HD”；高度未知或低于门槛的流不入选。BBC One、BBC Two 各自合并地区和画质
+变体，只保留一个频道；BBC Scotland、时移频道仍是独立身份。
+
+HLS 会追踪变体、音视频 rendition、重定向、密钥与媒体请求的主机；公开可获取的
+16 字节 AES-128 密钥允许使用，但拒绝 DRM。明文 DASH 必须实际取得初始化段和
+媒体段，并检查所有可选音视频 representation（最多 32 个，超过则拒绝）。
+IP 地址形式的播放依赖不支持仅靠 DNS 的分流，HLS Content Steering 也不支持，
+因此这两类不会作为已完整解析的可播放候选发布。
+
+输出目录是指向同代产物的原子切换符号链接，内含 `tv.m3u`、
+`tv-domains.txt` 与筛选报告 `report.json`；已有的真实目录会被拒绝，不会覆盖。
+新一代必须同时含 BBC One、BBC Two，且至少有 10 个符合条件的唯一频道，
+否则失败并保留全部旧产物。域名文件只收录最终选中频道的精确播放依赖主机，
+不加入台标、源目录网站或宽泛的共享域名后缀。
+
 ## RouterOS 电视域名分流
 
-`services.rulesSync.tvDomains` 同时生成 mihomo 的 `rules/tv.yaml` 与
-RouterOS `domain.rsc` 中的 `comment=tv` DNS 转发项，目标为已有的 `clash`
-forwarder。RouterOS 导入时先清理 `gfw`、`tv` 两个托管组，再添加新一代规则；
-同名域同时来自 GFW 列表与 `tvDomains` 时只生成一条，以 `tv` 分组为准。
-清空 `tvDomains` 也会移除旧电视域名，其他手工 DNS 记录不受影响。
+`services.rulesSync.tvDomains` 是静态电视域名列表；可选的
+`services.rulesSync.tvDomainsFile`（默认 `null`）从运行时文件逐行读取域名，
+例如设置为上述 `/var/lib/iptv-uk/tv-domains.txt`。配置文件输入时，两者取并集；
+文件不可读则在发布前失败，不用残缺输入替换旧输出。要移除电视域名，须从所有
+已启用的输入中移除，不能只清空静态列表而留下运行时文件中的同名项。
+
+同一并集生成 mihomo 的 `rules/tv.yaml`、独立小文件 `tv.rsc`，并参与完整的
+`domain.rsc` 与 DNSmasq 输出。生成阶段即从 GFW 域名集合中排除电视精确域名，
+避免仅依赖 RouterOS 导入顺序决定优先级；不扩大为整个共享后缀的优先级。
+RouterOS 电视记录使用 `type=FWD`、`forward-to=clash`、`comment=tv`，
+不设置 `address-list`。
+
+完整 `domain.rsc` 导入先清理 `gfw`、`tv` 两个托管组，再添加新一代规则。
+独立 `tv.rsc` 只替换旧 `tv` 组，并在添加每个新电视精确域名前删除已有的同名
+DNS 记录，因此会替换同名的旧 GFW 或手工记录，但保留其他 GFW 和手工记录。
+完整 → 电视、电视 → 完整两种导入顺序均可重复，电视优先且不会因重复域名报错；
+空电视集合也能安全清理旧 `tv` 组。
 
 电视客户端必须经站点的 DNS 转发拿到 mihomo Fake-IP，再由网关路由到
 mihomo；仅通过显式 HTTP/SOCKS 代理访问成功，不能证明这条透明播放链路正常。

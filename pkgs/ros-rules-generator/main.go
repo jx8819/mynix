@@ -725,6 +725,48 @@ func generateDomainRsc(domains, tvDomains []string, debug bool) []byte {
 	return res
 }
 
+// writeRouterOSString quotes values without allowing RouterOS variable expansion.
+func writeRouterOSString(buf *bytes.Buffer, value string) {
+	buf.WriteByte('"')
+	for i := range len(value) {
+		switch value[i] {
+		case '\\', '"', '$':
+			buf.WriteByte('\\')
+			buf.WriteByte(value[i])
+		case '\n':
+			buf.WriteString(`\n`)
+		case '\r':
+			buf.WriteString(`\r`)
+		case '\t':
+			buf.WriteString(`\t`)
+		default:
+			buf.WriteByte(value[i])
+		}
+	}
+	buf.WriteByte('"')
+}
+
+// generateTvRsc refreshes only TV DNS entries, without rewriting the GFW group.
+// Exact-name replacement also takes over old GFW entries and clears their
+// address-list/type settings. Each foreach is safe when its selector is empty;
+// separate commands avoid RouterOS's parser limit for large inline arrays.
+func generateTvRsc(domains []string, debug bool) []byte {
+	var buf bytes.Buffer
+	buf.WriteString(":foreach entry in=[/ip dns static find where comment=\"tv\"] do={ /ip dns static remove $entry }\n")
+	for _, domain := range domains {
+		buf.WriteString(":foreach entry in=[/ip dns static find where name=")
+		writeRouterOSString(&buf, domain)
+		buf.WriteString("] do={ /ip dns static remove $entry }\n")
+		buf.WriteString("/ip dns static add type=FWD match-subdomain=yes forward-to=clash comment=tv name=")
+		writeRouterOSString(&buf, domain)
+		buf.WriteByte('\n')
+	}
+	if debug {
+		log.Printf("[DEBUG] tv.rsc: generated %d static DNS FWD entries (%d bytes)", len(domains), buf.Len())
+	}
+	return buf.Bytes()
+}
+
 // generateDnsmasqForward 生成 dnsmasq 按域名转发行（server=/域名/上游#端口），
 // 是 domain.rsc 的 dnsmasq 对应物，供 OpenWrt 等 dnsmasq 站点使用；每个上游一份输出文件。
 // tvDomains 非空时追加到同一文件（gfw 段之后），与 domain.rsc 的 comment=tv 组同一份域名。
@@ -1452,7 +1494,7 @@ func (g *Generator) assembleFiles(ctx context.Context, fetched map[string][]byte
 
 	// 装配产物清单：顶层 clean-list.txt、domain.rsc、clash-gfw-list.txt 等；
 	// rules/ 下 ai.yaml、google_rules.yaml 与每个规则透传源一个文件
-	filesToWrite := make([]fileEntry, 0, len(baseOutputPaths)+len(g.dnsmasqForwards)+len(g.sources.Rules)+1)
+	filesToWrite := make([]fileEntry, 0, len(baseOutputPaths)+len(g.dnsmasqForwards)+len(g.sources.Rules)+3)
 
 	filesToWrite = append(filesToWrite, fileEntry{path: "clean-list.txt", content: cleanListBuf.Bytes()})
 	filesToWrite = append(filesToWrite, fileEntry{path: "domain.rsc", content: domainRscData})
@@ -1474,9 +1516,11 @@ func (g *Generator) assembleFiles(ctx context.Context, fetched map[string][]byte
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/ai.yaml", content: aiYaml, isYaml: true})
 	filesToWrite = append(filesToWrite, fileEntry{path: "rules/google_rules.yaml", content: googleRulesYaml, isYaml: true})
 
-	// rules/tv.yaml（可选；tvDomains 为空则不产出，与 tmdb.rsc 同为按需产物）
+	// TV 产物按需生成；整代替换时，关闭 TV 会同时移除旧 tv.rsc 和 rules/tv.yaml。
 	if len(tvList) > 0 {
-		filesToWrite = append(filesToWrite, fileEntry{path: "rules/tv.yaml", content: generateTvYaml(tvList, g.debug), isYaml: true})
+		filesToWrite = append(filesToWrite,
+			fileEntry{path: "tv.rsc", content: generateTvRsc(tvList, g.debug)},
+			fileEntry{path: "rules/tv.yaml", content: generateTvYaml(tvList, g.debug), isYaml: true})
 	}
 
 	// 规则透传文件写到配置的输出路径（.yaml 输出做非 ASCII 过滤）
@@ -1490,7 +1534,7 @@ func (g *Generator) assembleFiles(ctx context.Context, fetched map[string][]byte
 // checkOutputs 校验产物清单：先与期望文件名集合比对（集合比较替代魔法数计数），
 // 再拒绝非法路径、重复路径与文件/目录冲突；全部通过后才允许触碰 staging。
 func (g *Generator) checkOutputs(filesToWrite []fileEntry, tmdbEnabled, tvEnabled bool) error {
-	expected := make(map[string]struct{}, len(baseOutputPaths)+len(g.dnsmasqForwards)+len(g.sources.Rules)+2)
+	expected := make(map[string]struct{}, len(baseOutputPaths)+len(g.dnsmasqForwards)+len(g.sources.Rules)+3)
 	for _, p := range baseOutputPaths {
 		expected[p] = struct{}{}
 	}
@@ -1504,6 +1548,7 @@ func (g *Generator) checkOutputs(filesToWrite []fileEntry, tmdbEnabled, tvEnable
 		expected["tmdb.rsc"] = struct{}{}
 	}
 	if tvEnabled {
+		expected["tv.rsc"] = struct{}{}
 		expected["rules/tv.yaml"] = struct{}{}
 	}
 

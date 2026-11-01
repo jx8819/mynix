@@ -1,6 +1,8 @@
 # 拉取、校验、过滤并按 mode 合并 IPTV 源；失败时原子保留旧产物。
 { lib
 , writeShellScriptBin
+, python3
+, ffmpeg-headless
 , telecomUrl ? ""
 , mobileUrl ? ""
 , telecomMinChannels ? 1
@@ -33,7 +35,13 @@
 , sportsSourceLabel ? "sports"
 , bbcSourceLabel ? "bbc"
 }:
-writeShellScriptBin "iptv-merge" ''
+let
+  ukPython = python3.withPackages (p: [ p.cryptography ]);
+  ukPlaylist = writeShellScriptBin "iptv-uk-sync" ''
+    exec ${ukPython}/bin/python3 ${./uk-playlist.py} --ffprobe ${ffmpeg-headless}/bin/ffprobe "$@"
+  '';
+in
+(writeShellScriptBin "iptv-merge" ''
   # 五种 mode（由各 systemd 单元通过 IPTV_MODE 选择，可同时发布不同模式）:
   #   - "both"         第一源优先全量（原序）+ 第二源过滤后补第一源没有的台（原序）
   #   - "telecom-only" 只拉取第一源
@@ -736,4 +744,6 @@ writeShellScriptBin "iptv-merge" ''
   esac
 
   trap - EXIT HUP INT TERM
-  ''
+  '').overrideAttrs (old: {
+    passthru = (old.passthru or {}) // { inherit ukPlaylist; };
+  })

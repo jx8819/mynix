@@ -31,10 +31,16 @@ let
       "-direct-domains-file" "${directDomainsFile}"
       "-proxy-domains-file" "${proxyDomainsFile}"
       "-clean-ip-domains-file" "${cleanIpDomainsFile}"
-      "-tv-domains-file" "${tvDomainsFile}"
       "-sources" "${sourcesFile}"
       "-dnsmasq-forwards-file" "${dnsmasqForwardsFile}"
     ]
+    ++ (if cfg.tvDomainsFile == null then
+      [ "-tv-domains-file" "${tvDomainsFile}" ]
+    else
+      [
+        "-tv-domains" (lib.concatStringsSep "," cfg.tvDomains)
+        "-tv-domains-file" cfg.tvDomainsFile
+      ])
     ++ lib.optionals cfg.tmdbDns.enable (
       [ "-tmdb-domains-file" "${tmdbDomainsFile}" ]
       ++ lib.optionals (cfg.tmdbDns.ednsClientSubnet != "") [ "-tmdb-edns-subnet" "${cfg.tmdbDns.ednsClientSubnet}" ]
@@ -111,7 +117,14 @@ in
     tvDomains = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [];
-      description = "TV streaming domains generated into rules/tv.yaml (classical DOMAIN-SUFFIX payload) and appended to the DNS forwarding outputs (domain.rsc comment=tv group and every domain.dnsmasq variant); empty generates none.";
+      description = "TV streaming domains generated into rules/tv.yaml (classical DOMAIN-SUFFIX payload), standalone tv.rsc, and the DNS forwarding outputs (domain.rsc comment=tv group and every domain.dnsmasq variant). Merged with tvDomainsFile when configured; an empty combined list generates no TV artifacts.";
+    };
+
+    tvDomainsFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "Additional runtime file of TV domains, one per line, merged with tvDomains. Null uses only the static tvDomains store file. An unreadable file aborts generation before publishing any outputs.";
+      example = "/etc/nixos/services/caddy/web/iptv/uk-tv/tv-domains.txt";
     };
 
     tmdbDns = {

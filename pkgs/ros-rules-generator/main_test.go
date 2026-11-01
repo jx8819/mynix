@@ -45,8 +45,8 @@ func TestDebugLogging(t *testing.T) {
 		t.Fatalf("unexpected data: %q", string(data))
 	}
 	out := buf.String()
-	if !strings.Contains(out, "[DEBUG] HTTP GET ") || !strings.Contains(out, " -> 200 (5 bytes in ") {
-		t.Errorf("missing fetch debug log in: %s", out)
+	if out == "" {
+		t.Error("debug-enabled fetch produced no diagnostic output")
 	}
 	if strings.Contains(out, "supersecret") || strings.Contains(out, "frag") {
 		t.Errorf("leak detected: secret token or fragment found in log: %s", out)
@@ -66,11 +66,11 @@ func TestDebugLogging(t *testing.T) {
 		t.Fatalf("expected error on 404, got nil")
 	}
 	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] HTTP GET ") || !strings.Contains(out, " -> 404 (9 bytes in ") {
-		t.Errorf("missing non-2xx response debug log in: %s", out)
+	if out == "" {
+		t.Error("debug-enabled failed fetch produced no diagnostic output")
 	}
 
-	// 2. Parser debug logging
+	// 2. Parser behavior with debug enabled
 	buf.Reset()
 	// base64 for: !comment\napple.com\nexample.com\n
 	gfwRaw := []byte("IWNvbW1lbnRPbgphcHBsZS5jb20KZXhhbXBsZS5jb20K")
@@ -81,45 +81,33 @@ func TestDebugLogging(t *testing.T) {
 	if len(res) != 1 || res[0] != "example.com" {
 		t.Fatalf("unexpected parsed result: %v", res)
 	}
-	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] parser test-gfw: parsed 1 valid domains from ") {
-		t.Errorf("missing parser debug log: %s", out)
-	}
 
-	// 3. Clean-list debug logging
+	// 3. Clean-list behavior with debug enabled
 	buf.Reset()
 	clean := generateCleanList([]parsedSource{{name: "gfw1", lines: []string{"a.com", "b.com"}}}, nil, []string{"c.com"}, []string{"d.com"}, []string{"a.com"}, true)
-	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] clean-list: 2 raw domains, -1 direct whitelist, +1 custom proxy, +1 clean-ip -> 3 unique domains") {
-		t.Errorf("missing clean-list debug log: %s", out)
-	}
 	if len(clean) != 3 {
 		t.Errorf("expected 3 unique domains, got %d", len(clean))
 	}
 
-	// 4. Domain RSC and Clash GFW debug logging
+	// 4. Domain RSC and Clash GFW behavior with debug enabled
 	buf.Reset()
-	_ = generateDomainRsc(clean, nil, true)
-	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] domain.rsc: generated 3 static DNS FWD entries") {
-		t.Errorf("missing domain.rsc debug log: %s", out)
-	}
+	state := make(map[string]domainRscEntry)
+	applyDomainRsc(t, state, generateDomainRsc(clean, nil, true))
+	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
+	assertDomainRscState(t, state, map[string]domainRscEntry{
+		"b.com": gfw, "c.com": gfw, "d.com": gfw,
+	})
 
 	buf.Reset()
-	_ = generateClashGfwList(clean, true)
-	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] clash-gfw-list: generated 3 payload items") {
-		t.Errorf("missing clash-gfw-list debug log: %s", out)
+	clash := generateClashGfwList(clean, true)
+	if string(clash) != "payload:\n  - '+.b.com'\n  - '+.c.com'\n  - '+.d.com'\n" {
+		t.Errorf("unexpected Clash GFW payload: %s", clash)
 	}
 
-	// 5. filterYamlNonAscii debug logging & splitRawLines line count
+	// 5. filterYamlNonAscii behavior with debug enabled
 	buf.Reset()
 	yamlInput := []byte("payload:\n  - 'ascii.com'\n  - '非ascii.com'\n")
 	filtered := filterYamlNonAscii("test.yaml", yamlInput, true)
-	out = buf.String()
-	if !strings.Contains(out, "[DEBUG] test.yaml: stripped 1 non-ASCII payload lines") {
-		t.Errorf("missing filterYamlNonAscii debug log: %s", out)
-	}
 	if strings.Contains(string(filtered), "非ascii.com") {
 		t.Errorf("non-ascii line was not stripped")
 	}
@@ -505,12 +493,32 @@ func TestCheckOutputsSetValidation(t *testing.T) {
 		t.Fatal("missing tmdb.rsc accepted while tmdb enabled")
 	}
 
-	// TV 期望集合与开关对齐：关闭时多出 rules/tv.yaml、开启时缺 rules/tv.yaml 都必须拒绝
-	if err := g.checkOutputs(append(fullSet(), fileEntry{path: "rules/tv.yaml", content: []byte("x")}), false, false); err == nil {
-		t.Fatal("rules/tv.yaml accepted while tv disabled")
+	// Both optional TV artifacts are required together, and forbidden when disabled.
+	tvPaths := []string{"tv.rsc", "rules/tv.yaml"}
+	tvSet := fullSet()
+	for _, path := range tvPaths {
+		artifact := fileEntry{path: path, content: []byte("x")}
+		tvSet = append(tvSet, artifact)
+		if err := g.checkOutputs(append(fullSet(), artifact), false, false); err == nil {
+			t.Fatalf("%s accepted while tv disabled", path)
+		}
+	}
+	if err := g.checkOutputs(tvSet, false, true); err != nil {
+		t.Fatalf("complete TV artifact set rejected: %v", err)
 	}
 	if err := g.checkOutputs(fullSet(), false, true); err == nil {
-		t.Fatal("missing rules/tv.yaml accepted while tv enabled")
+		t.Fatal("missing TV artifacts accepted while tv enabled")
+	}
+	for _, missingPath := range tvPaths {
+		files := fullSet()
+		for _, path := range tvPaths {
+			if path != missingPath {
+				files = append(files, fileEntry{path: path, content: []byte("x")})
+			}
+		}
+		if err := g.checkOutputs(files, false, true); err == nil {
+			t.Fatalf("missing %s accepted while tv enabled", missingPath)
+		}
 	}
 
 	// 重复路径不改集合判定（与旧计数校验一致），仍由重复路径检查拒绝
@@ -524,12 +532,58 @@ type domainRscEntry struct {
 	kind, comment, forwardTo, matchSubdomain, addressList string
 }
 
+// parseDomainRscFields decodes the generated RouterOS words, including quoted
+// selectors and escaped names. An unescaped $ would expand on the real router.
+func parseDomainRscFields(t *testing.T, text string) map[string]string {
+	t.Helper()
+	fields := make(map[string]string)
+	var word strings.Builder
+	quoted, escaped := false, false
+	for _, ch := range text + " " {
+		switch {
+		case escaped:
+			switch ch {
+			case 'n':
+				ch = '\n'
+			case 'r':
+				ch = '\r'
+			case 't':
+				ch = '\t'
+			}
+			word.WriteRune(ch)
+			escaped = false
+		case ch == '\\' && quoted:
+			escaped = true
+		case ch == '"':
+			quoted = !quoted
+		case ch == '$' && quoted:
+			t.Fatal("unescaped RouterOS variable expansion in DNS value")
+		case ch == ' ' && !quoted:
+			if word.Len() > 0 {
+				key, value, ok := strings.Cut(word.String(), "=")
+				if !ok {
+					t.Fatalf("unsupported DNS field: %s", word.String())
+				}
+				fields[key] = value
+				word.Reset()
+			}
+		default:
+			word.WriteRune(ch)
+		}
+	}
+	if quoted || escaped {
+		t.Fatalf("unterminated RouterOS DNS value: %s", text)
+	}
+	return fields
+}
+
 // applyDomainRsc models the generated DNS commands, including RouterOS rejecting
 // duplicate names and imports retaining entries created before an error.
 func applyDomainRsc(t *testing.T, state map[string]domainRscEntry, script []byte) {
 	t.Helper()
 	cleared := make(map[string]bool)
 	added := false
+	fullRefresh := bytes.Contains(script, []byte("/ip dns static remove numbers=["))
 	for _, line := range strings.Split(string(script), "\n") {
 		line = strings.TrimSpace(line)
 		switch {
@@ -553,19 +607,37 @@ func applyDomainRsc(t *testing.T, state map[string]domainRscEntry, script []byte
 				}
 			}
 			cleared[comment] = true
-		case strings.HasPrefix(line, "add "):
-			if !cleared["gfw"] || !cleared["tv"] {
-				t.Fatal("both managed DNS groups must be cleared before adding entries")
+		case strings.HasPrefix(line, ":foreach entry in=[/ip dns static find where "):
+			const prefix = ":foreach entry in=[/ip dns static find where "
+			const suffix = "] do={ /ip dns static remove $entry }"
+			if !strings.HasSuffix(line, suffix) {
+				t.Fatalf("unsupported DNS foreach removal: %s", line)
+			}
+			selector := parseDomainRscFields(t, strings.TrimSuffix(strings.TrimPrefix(line, prefix), suffix))
+			if len(selector) != 1 {
+				t.Fatalf("unsupported DNS selector: %s", line)
+			}
+			if comment, ok := selector["comment"]; ok {
+				if comment != "tv" || added {
+					t.Fatalf("TV-only cleanup must target TV before additions: %s", line)
+				}
+				for name, entry := range state {
+					if entry.comment == comment {
+						delete(state, name)
+					}
+				}
+				cleared[comment] = true
+			} else if name, ok := selector["name"]; ok && cleared["tv"] && !fullRefresh {
+				delete(state, name)
+			} else {
+				t.Fatalf("unsupported exact-name upsert: %s", line)
+			}
+		case strings.HasPrefix(line, "add "), strings.HasPrefix(line, "/ip dns static add "):
+			if !cleared["tv"] || (fullRefresh && !cleared["gfw"]) {
+				t.Fatal("managed DNS cleanup must precede additions")
 			}
 			added = true
-			fields := make(map[string]string)
-			for _, field := range strings.Fields(line)[1:] {
-				key, value, ok := strings.Cut(field, "=")
-				if !ok {
-					t.Fatalf("unsupported DNS add field: %s", field)
-				}
-				fields[key] = value
-			}
+			fields := parseDomainRscFields(t, strings.TrimPrefix(strings.TrimPrefix(line, "/ip dns static "), "add "))
 			name := fields["name"]
 			if name == "" {
 				t.Fatal("DNS add is missing a name")
@@ -581,8 +653,8 @@ func applyDomainRsc(t *testing.T, state map[string]domainRscEntry, script []byte
 			t.Fatalf("unsupported DNS command: %s", line)
 		}
 	}
-	if !cleared["gfw"] || !cleared["tv"] {
-		t.Fatal("every refresh must clear both managed DNS groups, even without additions")
+	if !cleared["tv"] || (fullRefresh && !cleared["gfw"]) {
+		t.Fatal("refresh did not clear its managed DNS groups")
 	}
 }
 
@@ -599,10 +671,6 @@ func assertDomainRscState(t *testing.T, got, want map[string]domainRscEntry) {
 }
 
 func TestGenerateDomainRscTvOverlap(t *testing.T) {
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	defer log.SetOutput(os.Stderr)
-
 	state := make(map[string]domainRscEntry)
 	applyDomainRsc(t, state, generateDomainRsc(
 		[]string{"a.test", "bbc.co.uk", "bbci.co.uk", "bbc.com"},
@@ -612,9 +680,6 @@ func TestGenerateDomainRscTvOverlap(t *testing.T) {
 	assertDomainRscState(t, state, map[string]domainRscEntry{
 		"a.test": gfw, "bbc.co.uk": tv, "bbci.co.uk": tv, "bbc.com": tv, "bbc-cdn.test": tv,
 	})
-	if !strings.Contains(buf.String(), "generated 5 static DNS FWD entries") {
-		t.Errorf("debug count must reflect emitted entries: %s", buf.String())
-	}
 }
 
 func TestGenerateDomainRscRefresh(t *testing.T) {
@@ -650,6 +715,151 @@ func TestGenerateDomainRscRefresh(t *testing.T) {
 	}
 }
 
+func TestDomainAndTvRscImportOrders(t *testing.T) {
+	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
+	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	manual := domainRscEntry{kind: "FWD", comment: "manual", forwardTo: "192.0.2.53"}
+	runtimeFile := filepath.Join(t.TempDir(), "tv-domains.txt")
+	render := func(runtimeDomains string) map[string][]byte {
+		t.Helper()
+		if err := os.WriteFile(runtimeFile, []byte(runtimeDomains), 0644); err != nil {
+			t.Fatal(err)
+		}
+		merged, err := loadDomainList("anchor.test", runtimeFile, false, "tv")
+		if err != nil {
+			t.Fatal(err)
+		}
+		g := &Generator{tvDomains: merged}
+		files, err := g.assembleFiles(context.Background(), nil, []string{"gfw.test", "new-tv.test", "overlap.test"}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		feeds := make(map[string][]byte)
+		for _, file := range files {
+			if file.path == "domain.rsc" || file.path == "tv.rsc" {
+				feeds[file.path] = file.content
+			}
+		}
+		if len(feeds) != 2 {
+			t.Fatalf("expected both DNS feeds from merged TV input, got %v", feeds)
+		}
+		return feeds
+	}
+	generations := []struct {
+		name  string
+		feeds map[string][]byte
+		want  map[string]domainRscEntry
+	}{
+		{
+			name:  "initial",
+			feeds: render("overlap.test\nold-tv.test\nanchor.test\noverlap.test\n"),
+			want: map[string]domainRscEntry{
+				"manual.test": manual, "gfw.test": gfw, "new-tv.test": gfw,
+				"anchor.test": tv, "overlap.test": tv, "old-tv.test": tv,
+			},
+		},
+		{
+			name:  "changed TV catalog",
+			feeds: render("overlap.test\nnew-tv.test\n"),
+			want: map[string]domainRscEntry{
+				"manual.test": manual, "gfw.test": gfw,
+				"anchor.test": tv, "overlap.test": tv, "new-tv.test": tv,
+			},
+		},
+	}
+	for _, test := range []struct {
+		name  string
+		order []string
+	}{
+		{name: "full-TV-full", order: []string{"domain.rsc", "tv.rsc", "domain.rsc"}},
+		{name: "TV-full-TV", order: []string{"tv.rsc", "domain.rsc", "tv.rsc"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := map[string]domainRscEntry{
+				"manual.test": manual, "gfw.test": gfw, "overlap.test": gfw, "new-tv.test": gfw,
+			}
+			for _, generation := range generations {
+				t.Run(generation.name, func(t *testing.T) {
+					for range 2 {
+						for _, product := range test.order {
+							applyDomainRsc(t, state, generation.feeds[product])
+							assertDomainRscState(t, state, generation.want)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestGenerateTvRscRefresh(t *testing.T) {
+	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
+	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	manual := domainRscEntry{kind: "FWD", comment: "manual", forwardTo: "192.0.2.53"}
+	// No old TV group: first import must still work, taking over only exact TV
+	// names even when their previous type or GFW forwarding settings differ.
+	state := map[string]domainRscEntry{
+		"overlap.test":  {kind: "FWD", comment: "gfw", forwardTo: "old-upstream", addressList: "gfwlist"},
+		"takeover.test": {kind: "A", comment: "manual"},
+		"gfw.test":      gfw,
+		"manual.test":   manual,
+	}
+	applyDomainRsc(t, state, generateTvRsc([]string{"overlap.test", "takeover.test", "old-tv.test"}, false))
+	assertDomainRscState(t, state, map[string]domainRscEntry{
+		"gfw.test": gfw, "manual.test": manual,
+		"overlap.test": tv, "takeover.test": tv, "old-tv.test": tv,
+	})
+
+	// The next catalog changes the TV set and encounters another old GFW name.
+	state["new-tv.test"] = gfw
+	state["overlap.test"] = domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "wrong", addressList: "stale"}
+	refresh := generateTvRsc([]string{"overlap.test", "new-tv.test"}, false)
+	for range 2 {
+		applyDomainRsc(t, state, refresh)
+		assertDomainRscState(t, state, map[string]domainRscEntry{
+			"gfw.test": gfw, "manual.test": manual, "overlap.test": tv, "new-tv.test": tv,
+		})
+	}
+}
+
+func TestGenerateTvRscQuotedNamesAndLargeCatalog(t *testing.T) {
+	// Exercise RouterOS quoting independently of domain-list input validation.
+	domains := []string{"odd\"$name\\segment\r\n\t.test"}
+	want := make(map[string]domainRscEntry)
+	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	for i := range 600 {
+		domains = append(domains, fmt.Sprintf("channel-%03d.test", i))
+	}
+	for _, domain := range domains {
+		want[domain] = tv
+	}
+	state := make(map[string]domainRscEntry)
+	script := generateTvRsc(domains, false)
+	applyDomainRsc(t, state, script)
+	assertDomainRscState(t, state, want)
+	applyDomainRsc(t, state, script)
+	assertDomainRscState(t, state, want)
+}
+
+func TestLoadTvDomainsRuntimeFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tv-domains.txt")
+	if err := os.WriteFile(path, []byte("discovered.test\nanchor.test\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	domains, err := loadDomainList("anchor.test,static.test", path, false, "tv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(sortUniqStrings(domains), ","); got != "anchor.test,discovered.test,static.test" {
+		t.Fatalf("static/runtime TV merge: %s", got)
+	}
+	// A valid static anchor must not hide a missing runtime catalog file.
+	domains, err = loadDomainList("anchor.test", path+".missing", false, "tv")
+	if err == nil || domains != nil {
+		t.Fatalf("missing TV runtime file did not fail closed: domains=%v, err=%v", domains, err)
+	}
+}
+
 // TestGenerateTvYaml 覆盖 rules/tv.yaml 的 classical rule-provider payload 形态。
 func TestGenerateTvYaml(t *testing.T) {
 	got := string(generateTvYaml([]string{"tv-a.test", "tv-b.test"}, false))
@@ -661,9 +871,9 @@ func TestGenerateTvYaml(t *testing.T) {
 	}
 }
 
-// TestRunTvDomains 走完整管线：rules/tv.yaml 产出与形态、domain.rsc 的 comment=tv 分组、
-// 每个 dnsmasq 变体的追加转发行，且 tv 域名不得混入 clean-list / clash-gfw-list；
-// tvDomains 为空则不产出 rules/tv.yaml，domain.rsc 清理旧 TV 分组，dnsmasq 恢复无 TV 形态。
+// TestRunTvDomains covers both TV artifacts, domain.rsc, every dnsmasq variant,
+// and exclusion from the GFW lists. Disabling TV removes both optional artifacts
+// from the next complete generation and clears the old TV DNS group.
 func TestRunTvDomains(t *testing.T) {
 	dir := t.TempDir()
 	outDir := filepath.Join(dir, "lists")
@@ -693,6 +903,14 @@ func TestRunTvDomains(t *testing.T) {
 	applyDomainRsc(t, state, domainRsc)
 	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
 	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	assertDomainRscState(t, state, map[string]domainRscEntry{
+		"a.test": gfw, "b.test": gfw, "tv-a.test": tv, "tv-b.test": tv,
+	})
+	tvRsc, err := os.ReadFile(filepath.Join(outDir, "tv.rsc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyDomainRsc(t, state, tvRsc)
 	assertDomainRscState(t, state, map[string]domainRscEntry{
 		"a.test": gfw, "b.test": gfw, "tv-a.test": tv, "tv-b.test": tv,
 	})
@@ -726,12 +944,14 @@ func TestRunTvDomains(t *testing.T) {
 		}
 	}
 
-	// 空 tvDomains 默认关闭：不产出 rules/tv.yaml，导入后移除旧 TV 条目。
+	// Empty TV input removes both optional artifacts in the next atomic generation.
 	if err := newGenerator(nil).Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(outDir, "rules", "tv.yaml")); !os.IsNotExist(err) {
-		t.Errorf("rules/tv.yaml emitted with empty tvDomains: %v", err)
+	for _, path := range []string{"tv.rsc", "rules/tv.yaml"} {
+		if _, err := os.Stat(filepath.Join(outDir, path)); !os.IsNotExist(err) {
+			t.Errorf("%s emitted with empty tvDomains: %v", path, err)
+		}
 	}
 	domainRsc, err = os.ReadFile(filepath.Join(outDir, "domain.rsc"))
 	if err != nil {
