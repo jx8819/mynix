@@ -11,6 +11,7 @@ let
   proxyDomainsFile = mkLinesFile "rules-sync-proxy-domains.txt" cfg.proxyDomains;
   cleanIpDomainsFile = mkLinesFile "rules-sync-clean-ip-domains.txt" cfg.cleanIpDomains;
   tmdbDomainsFile = mkLinesFile "rules-sync-tmdb-domains.txt" cfg.tmdbDns.domains;
+  tvDomainsFile = mkLinesFile "rules-sync-tv-domains.txt" cfg.tvDomains;
 
   sourcesFile = pkgs.writeText "rules-sync-sources.json" (builtins.toJSON {
     gfwlist = cfg.gfwlistSources;
@@ -30,6 +31,7 @@ let
       "-direct-domains-file" "${directDomainsFile}"
       "-proxy-domains-file" "${proxyDomainsFile}"
       "-clean-ip-domains-file" "${cleanIpDomainsFile}"
+      "-tv-domains-file" "${tvDomainsFile}"
       "-sources" "${sourcesFile}"
       "-dnsmasq-forwards-file" "${dnsmasqForwardsFile}"
     ]
@@ -104,6 +106,12 @@ in
       type = lib.types.listOf lib.types.str;
       default = [];
       description = "Clean IP domains routed through clean egress proxies (generated into rules/clean-ip.txt and domain.rsc).";
+    };
+
+    tvDomains = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [];
+      description = "TV streaming domains generated into rules/tv.yaml (classical DOMAIN-SUFFIX payload) and appended to the DNS forwarding outputs (domain.rsc comment=tv group and every domain.dnsmasq variant); empty generates none.";
     };
 
     tmdbDns = {
