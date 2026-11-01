@@ -520,25 +520,133 @@ func TestCheckOutputsSetValidation(t *testing.T) {
 	}
 }
 
-// TestGenerateDomainRscTv 覆盖 domain.rsc 的 comment=tv 分组：空 tvDomains 逐字节保持原格式，
-// 非空时追加独立 remove 序言行 + FWD 条目（语义同 gfw 组）。
-func TestGenerateDomainRscTv(t *testing.T) {
-	gfwOnly := "/ip dns static remove numbers=[/ip dns static find comment=gfw]\n" +
-		"/ip dns static\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=a.test\n"
-	if got := string(generateDomainRsc([]string{"a.test"}, nil, false)); got != gfwOnly {
-		t.Errorf("empty tvDomains must be byte-identical:\ngot:\n%q\nwant:\n%q", got, gfwOnly)
+type domainRscEntry struct {
+	kind, comment, forwardTo, matchSubdomain, addressList string
+}
+
+// applyDomainRsc models the generated DNS commands, including RouterOS rejecting
+// duplicate names and imports retaining entries created before an error.
+func applyDomainRsc(t *testing.T, state map[string]domainRscEntry, script []byte) {
+	t.Helper()
+	cleared := make(map[string]bool)
+	added := false
+	for _, line := range strings.Split(string(script), "\n") {
+		line = strings.TrimSpace(line)
+		switch {
+		case line == "", line == "/ip dns static":
+			continue
+		case strings.HasPrefix(line, "/ip dns static remove "):
+			if added {
+				t.Fatal("managed DNS cleanup must precede every add")
+			}
+			_, selector, ok := strings.Cut(line, "find comment=")
+			if !ok || !strings.HasSuffix(selector, "]") {
+				t.Fatalf("unsupported DNS removal: %s", line)
+			}
+			comment := strings.TrimSuffix(selector, "]")
+			if comment != "gfw" && comment != "tv" {
+				t.Fatalf("removal targets unmanaged DNS entries: %s", line)
+			}
+			for name, entry := range state {
+				if entry.comment == comment {
+					delete(state, name)
+				}
+			}
+			cleared[comment] = true
+		case strings.HasPrefix(line, "add "):
+			if !cleared["gfw"] || !cleared["tv"] {
+				t.Fatal("both managed DNS groups must be cleared before adding entries")
+			}
+			added = true
+			fields := make(map[string]string)
+			for _, field := range strings.Fields(line)[1:] {
+				key, value, ok := strings.Cut(field, "=")
+				if !ok {
+					t.Fatalf("unsupported DNS add field: %s", field)
+				}
+				fields[key] = value
+			}
+			name := fields["name"]
+			if name == "" {
+				t.Fatal("DNS add is missing a name")
+			}
+			if _, exists := state[name]; exists {
+				t.Fatalf("RouterOS import would abort on duplicate DNS name %q", name)
+			}
+			state[name] = domainRscEntry{
+				kind: fields["type"], comment: fields["comment"], forwardTo: fields["forward-to"],
+				matchSubdomain: fields["match-subdomain"], addressList: fields["address-list"],
+			}
+		default:
+			t.Fatalf("unsupported DNS command: %s", line)
+		}
 	}
-	if got := string(generateDomainRsc([]string{"a.test"}, []string{}, false)); got != gfwOnly {
-		t.Errorf("zero-length tvDomains must be byte-identical:\ngot:\n%q\nwant:\n%q", got, gfwOnly)
+	if !cleared["gfw"] || !cleared["tv"] {
+		t.Fatal("every refresh must clear both managed DNS groups, even without additions")
 	}
-	want := gfwOnly +
-		"/ip dns static remove numbers=[/ip dns static find comment=tv]\n" +
-		"/ip dns static\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash comment=tv name=tv-a.test\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash comment=tv name=tv-b.test\n"
-	if got := string(generateDomainRsc([]string{"a.test"}, []string{"tv-a.test", "tv-b.test"}, false)); got != want {
-		t.Errorf("comment=tv group mismatch:\ngot:\n%s\nwant:\n%s", got, want)
+}
+
+func assertDomainRscState(t *testing.T, got, want map[string]domainRscEntry) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Errorf("DNS entry count: got %d, want %d; entries: %v", len(got), len(want), got)
+	}
+	for name, entry := range want {
+		if actual, ok := got[name]; !ok || actual != entry {
+			t.Errorf("DNS entry %q: got %+v (exists=%t), want %+v", name, actual, ok, entry)
+		}
+	}
+}
+
+func TestGenerateDomainRscTvOverlap(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	state := make(map[string]domainRscEntry)
+	applyDomainRsc(t, state, generateDomainRsc(
+		[]string{"a.test", "bbc.co.uk", "bbci.co.uk", "bbc.com"},
+		[]string{"bbc.co.uk", "bbci.co.uk", "bbc.com", "bbci.co.uk", "bbc-cdn.test"}, true))
+	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
+	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	assertDomainRscState(t, state, map[string]domainRscEntry{
+		"a.test": gfw, "bbc.co.uk": tv, "bbci.co.uk": tv, "bbc.com": tv, "bbc-cdn.test": tv,
+	})
+	if !strings.Contains(buf.String(), "generated 5 static DNS FWD entries") {
+		t.Errorf("debug count must reflect emitted entries: %s", buf.String())
+	}
+}
+
+func TestGenerateDomainRscRefresh(t *testing.T) {
+	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
+	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	manual := domainRscEntry{kind: "FWD", comment: "manual", forwardTo: "192.0.2.53"}
+	state := map[string]domainRscEntry{
+		"stale-gfw.test": gfw, "stale-tv.test": tv, "manual.test": manual,
+	}
+	for _, step := range []struct {
+		name        string
+		domains, tv []string
+	}{
+		{name: "initial", domains: []string{"a.test"}, tv: []string{"b.test"}},
+		{name: "swap groups", domains: []string{"b.test"}, tv: []string{"a.test"}},
+		{name: "repeat import", domains: []string{"b.test"}, tv: []string{"a.test"}},
+		{name: "disable nil TV", domains: []string{"a.test", "b.test"}},
+		{name: "reenable TV", domains: []string{"a.test"}, tv: []string{"b.test"}},
+		{name: "disable empty TV", domains: []string{"b.test"}, tv: []string{}},
+		{name: "clear all managed entries"},
+	} {
+		t.Run(step.name, func(t *testing.T) {
+			applyDomainRsc(t, state, generateDomainRsc(step.domains, step.tv, false))
+			want := map[string]domainRscEntry{"manual.test": manual}
+			for _, name := range step.domains {
+				want[name] = gfw
+			}
+			for _, name := range step.tv {
+				want[name] = tv
+			}
+			assertDomainRscState(t, state, want)
+		})
 	}
 }
 
@@ -555,7 +663,7 @@ func TestGenerateTvYaml(t *testing.T) {
 
 // TestRunTvDomains 走完整管线：rules/tv.yaml 产出与形态、domain.rsc 的 comment=tv 分组、
 // 每个 dnsmasq 变体的追加转发行，且 tv 域名不得混入 clean-list / clash-gfw-list；
-// tvDomains 为空则不产出 rules/tv.yaml、domain.rsc 与 dnsmasq 输出逐字节保持原样。
+// tvDomains 为空则不产出 rules/tv.yaml，domain.rsc 清理旧 TV 分组，dnsmasq 恢复无 TV 形态。
 func TestRunTvDomains(t *testing.T) {
 	dir := t.TempDir()
 	outDir := filepath.Join(dir, "lists")
@@ -577,16 +685,18 @@ func TestRunTvDomains(t *testing.T) {
 	if err := newGenerator([]string{"tv-b.test", "tv-a.test", "tv-a.test"}).Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	domainRscWant := "/ip dns static remove numbers=[/ip dns static find comment=gfw]\n" +
-		"/ip dns static\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=a.test\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=b.test\n" +
-		"/ip dns static remove numbers=[/ip dns static find comment=tv]\n" +
-		"/ip dns static\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash comment=tv name=tv-a.test\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash comment=tv name=tv-b.test\n"
+	domainRsc, err := os.ReadFile(filepath.Join(outDir, "domain.rsc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	state := make(map[string]domainRscEntry)
+	applyDomainRsc(t, state, domainRsc)
+	gfw := domainRscEntry{kind: "FWD", comment: "gfw", forwardTo: "clash", matchSubdomain: "yes", addressList: "gfwlist"}
+	tv := domainRscEntry{kind: "FWD", comment: "tv", forwardTo: "clash", matchSubdomain: "yes"}
+	assertDomainRscState(t, state, map[string]domainRscEntry{
+		"a.test": gfw, "b.test": gfw, "tv-a.test": tv, "tv-b.test": tv,
+	})
 	expected := map[string]string{
-		"domain.rsc": domainRscWant,
 		"rules/tv.yaml": "payload:\n" +
 			"  - DOMAIN-SUFFIX,tv-a.test\n" +
 			"  - DOMAIN-SUFFIX,tv-b.test\n",
@@ -616,19 +726,20 @@ func TestRunTvDomains(t *testing.T) {
 		}
 	}
 
-	// 空 tvDomains 默认关闭：不产出 rules/tv.yaml，其余输出逐字节保持无 tv 形态
+	// 空 tvDomains 默认关闭：不产出 rules/tv.yaml，导入后移除旧 TV 条目。
 	if err := newGenerator(nil).Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(outDir, "rules", "tv.yaml")); !os.IsNotExist(err) {
 		t.Errorf("rules/tv.yaml emitted with empty tvDomains: %v", err)
 	}
-	gfwOnlyRsc := "/ip dns static remove numbers=[/ip dns static find comment=gfw]\n" +
-		"/ip dns static\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=a.test\n" +
-		"add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=b.test\n"
+	domainRsc, err = os.ReadFile(filepath.Join(outDir, "domain.rsc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	applyDomainRsc(t, state, domainRsc)
+	assertDomainRscState(t, state, map[string]domainRscEntry{"a.test": gfw, "b.test": gfw})
 	for path, want := range map[string]string{
-		"domain.rsc": gfwOnlyRsc,
 		"domain.dnsmasq.conf": "# generated by ros-rules-generator - do not edit\n" +
 			"# forward listed domains to 127.0.0.1#1053\n" +
 			"server=/a.test/127.0.0.1#1053\n" +

@@ -692,21 +692,31 @@ func generateCleanList(sources []parsedSource, cleanAi, myProxy, cleanIp, direct
 
 func generateDomainRsc(domains, tvDomains []string, debug bool) []byte {
 	var domainRscBuf bytes.Buffer
+	// 先清理两个受管分组，再添加任何条目，允许域名在 gfw/tv 间迁移；
+	// 即使关闭 TV 也清理旧 tv 条目，其他 comment 的手工条目不受影响。
 	domainRscBuf.WriteString("/ip dns static remove numbers=[/ip dns static find comment=gfw]\n")
+	domainRscBuf.WriteString("/ip dns static remove numbers=[/ip dns static find comment=tv]\n")
 	domainRscBuf.WriteString("/ip dns static\n")
-	for _, domain := range domains {
-		fmt.Fprintf(&domainRscBuf, "add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=%s\n", domain)
+	tvNames := make(map[string]bool, len(tvDomains))
+	for _, domain := range tvDomains {
+		tvNames[domain] = false
 	}
-	entries := len(domains)
-	// comment=tv 独立分组（同 tmdb 前例）：自有 remove 序言行，换代只清本组、不动 gfw 与手工条目；
-	// FWD 语义与 gfw 组相同（type/match-subdomain/forward-to），随 domain.rsc 一起被现有拉取方导入。
-	if len(tvDomains) > 0 {
-		domainRscBuf.WriteString("/ip dns static remove numbers=[/ip dns static find comment=tv]\n")
-		domainRscBuf.WriteString("/ip dns static\n")
-		for _, domain := range tvDomains {
-			fmt.Fprintf(&domainRscBuf, "add type=FWD match-subdomain=yes forward-to=clash comment=tv name=%s\n", domain)
+	entries := 0
+	for _, domain := range domains {
+		if _, tv := tvNames[domain]; tv {
+			continue
 		}
-		entries += len(tvDomains)
+		fmt.Fprintf(&domainRscBuf, "add type=FWD match-subdomain=yes forward-to=clash address-list=gfwlist comment=gfw name=%s\n", domain)
+		entries++
+	}
+	// TV 优先于 GFW，且每个 TV 域名只输出一次；map 的值记录是否已输出。
+	for _, domain := range tvDomains {
+		if tvNames[domain] {
+			continue
+		}
+		fmt.Fprintf(&domainRscBuf, "add type=FWD match-subdomain=yes forward-to=clash comment=tv name=%s\n", domain)
+		tvNames[domain] = true
+		entries++
 	}
 	res := domainRscBuf.Bytes()
 	if debug {

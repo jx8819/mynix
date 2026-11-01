@@ -44,6 +44,17 @@ services.iptv-merge.outputs = [
 完整 service 单元名最长 255 字节。名称碰撞按最终结果检查：
 例如普通组播的 `name = "sports"` 会与未命名的体育组播输出冲突。
 
+## RouterOS 电视域名分流
+
+`services.rulesSync.tvDomains` 同时生成 mihomo 的 `rules/tv.yaml` 与
+RouterOS `domain.rsc` 中的 `comment=tv` DNS 转发项，目标为已有的 `clash`
+forwarder。RouterOS 导入时先清理 `gfw`、`tv` 两个托管组，再添加新一代规则；
+同名域同时来自 GFW 列表与 `tvDomains` 时只生成一条，以 `tv` 分组为准。
+清空 `tvDomains` 也会移除旧电视域名，其他手工 DNS 记录不受影响。
+
+电视客户端必须经站点的 DNS 转发拿到 mihomo Fake-IP，再由网关路由到
+mihomo；仅通过显式 HTTP/SOCKS 代理访问成功，不能证明这条透明播放链路正常。
+
 ## rtp2httpd 软件包
 
 `packages.x86_64-linux.rtp2httpd` 与 overlay 的 `pkgs.rtp2httpd` 从上游
