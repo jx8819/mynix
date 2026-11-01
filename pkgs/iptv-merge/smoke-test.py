@@ -2,8 +2,10 @@
 """Offline regression smoke for a real built iptv-merge executable."""
 
 import argparse
+import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -57,6 +59,16 @@ SPORTS_PAIRS = {
     "last": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Sport",News标清\n',
              "http://sports.example:4022/udp/239.30.0.2:1234?token=second&fcc=original#track"),
 }
+BBC_PAIRS = {
+    "guide": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" group-title="Guide",Github「使用说明」\n',
+              "https://bbc.example/hosts.txt?format=m3u#guide"),
+    "first": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" tvg-logo="https://logo.example/bbc,preview.png" group-title="Sport",News\n',
+              "https://bbc.example//index.m3u8?token=a%26b&fcc=provider%3A9000&fcc-type=source#main"),
+    "blacklisted": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" group-title="Sport",睛彩竞技\n',
+                    "https://bbc.example/excluded.m3u8?token=original"),
+    "last": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" group-title="Sport",News标清\n',
+             "http://bbc.example:4022/udp/239.30.0.2:1234?token=second&fcc=original#track"),
+}
 
 
 def playlist(pairs, header=HEADER):
@@ -91,6 +103,11 @@ def expected_supplemented(strategy, mobile_filters, fcc=True):
 def expected_sports(sports_filters):
     accepted = ["first", "last"] if sports_filters else list(SPORTS_PAIRS)
     return playlist([SPORTS_PAIRS[key] for key in accepted], header="")
+
+
+def expected_bbc(bbc_filters):
+    accepted = ["first", "last"] if bbc_filters else list(BBC_PAIRS)
+    return playlist([BBC_PAIRS[key] for key in accepted], header="")
 
 
 def source(gateway):
@@ -132,6 +149,77 @@ def playlist_content(path):
     )
 
 
+def check_module_unit_names(repo_root):
+    """Regression for the modules/iptv-merge.nix suffix convention, e.g. a combined
+    mode+sports+bbc output must be named iptv-fcc-sports-bbc-sync. Evaluates the NixOS
+    module in place (no build); skipped when nix or the module is unavailable."""
+    module = repo_root / "modules" / "iptv-merge.nix"
+    nix = shutil.which("nix")
+    if nix is None or not module.is_file():
+        print("SKIP: module unit naming check (nix or modules/iptv-merge.nix unavailable)")
+        return
+    expr = f'''
+let
+  flake = builtins.getFlake "path:{repo_root}";
+  pkgs = flake.inputs.nixpkgs.legacyPackages.x86_64-linux;
+  inherit (pkgs) lib;
+  stub = {{ lib, ... }}: {{
+    options.systemd.services = lib.mkOption {{ type = lib.types.attrsOf lib.types.anything; default = {{}}; }};
+    options.systemd.timers = lib.mkOption {{ type = lib.types.attrsOf lib.types.anything; default = {{}}; }};
+    options.systemd.tmpfiles.rules = lib.mkOption {{ type = lib.types.listOf lib.types.str; default = []; }};
+    options.assertions = lib.mkOption {{ type = lib.types.listOf lib.types.anything; default = []; }};
+  }};
+  evalOutputs = outputs: lib.evalModules {{
+    specialArgs = {{ inherit pkgs; }};
+    modules = [
+      stub
+      (import "${{flake}}/modules/iptv-merge.nix")
+      ({{ ... }}: {{
+        services.iptv-merge = {{
+          enable = true;
+          service = {{ user = "sync"; group = "sync"; }};
+          inherit outputs;
+        }};
+      }})
+    ];
+  }};
+  fcc = {{ mode = "fcc"; fcc = {{ gateway = "192.0.2.10:5140"; address = "198.51.100.30"; port = 8027; }}; }};
+  mc = udpxy: {{ mode = "multicast"; inherit udpxy; }};
+  combined = evalOutputs [ (fcc // {{ sports = true; bbc = true; outputPath = "/var/lib/iptv/combined.m3u"; }}) ];
+  named = evalOutputs [
+    (fcc // {{ name = "lp"; sports = true; bbc = true; outputPath = "/var/lib/iptv/lp-fcc.m3u"; }})
+    ((mc "proxy.example:4022") // {{ name = "lp"; sports = true; outputPath = "/var/lib/iptv/lp-mc.m3u"; }})
+    ((mc "proxy.example:4022") // {{ name = "lz"; bbc = true; outputPath = "/var/lib/iptv/lz-mc.m3u"; }})
+    ((mc "proxy.example:4022") // {{ sports = true; bbc = true; outputPath = "/var/lib/iptv/mc-full.m3u"; }})
+    ((mc "proxy.example:4022") // {{ outputPath = "/var/lib/iptv/mc-plain.m3u"; }})
+  ];
+in {{
+  combined = builtins.attrNames combined.config.systemd.services;
+  named = builtins.attrNames named.config.systemd.services;
+  failed = map (a: a.message) (builtins.filter (a: !a.assertion) (combined.config.assertions ++ named.config.assertions));
+}}
+'''
+    result = subprocess.run(
+        [nix, "eval", "--impure", "--json", "--expr", expr],
+        text=True, capture_output=True, timeout=600,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"module unit naming eval failed:\n{result.stderr}")
+    data = json.loads(result.stdout)
+    if data["combined"] != ["iptv-fcc-sports-bbc-sync"]:
+        raise AssertionError(f"combined mode+sports+bbc unit name: {data['combined']}")
+    want_named = {
+        "iptv-fcc-lp-sports-bbc-sync", "iptv-multicast-lp-sports-sync",
+        "iptv-multicast-lz-bbc-sync", "iptv-multicast-sports-bbc-sync",
+        "iptv-multicast-sync",
+    }
+    if set(data["named"]) != want_named:
+        raise AssertionError(f"named output unit names: {sorted(data['named'])}, want {sorted(want_named)}")
+    if data["failed"]:
+        raise AssertionError(f"module assertions failed for sports/bbc combinations: {data['failed']}")
+    print("PASS: module unit naming (mode+sports+bbc suffix, named outputs, assertions)")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("executable", type=Path)
@@ -146,6 +234,10 @@ def main():
     parser.add_argument(
         "--sports-filters", action="store_true",
         help='expect sportsBlacklist=["睛彩", "说明"] (neutral sports defaults otherwise)',
+    )
+    parser.add_argument(
+        "--bbc-filters", action="store_true",
+        help='expect bbcBlacklist=["睛彩", "说明"] (neutral bbc defaults otherwise)',
     )
     args = parser.parse_args()
     executable = args.executable.resolve()
@@ -185,6 +277,15 @@ def main():
         "/sports-unpaired.m3u": playlist([SPORTS_PAIRS["first"]]) + SPORT,
         "/sports-invalid-name.m3u": HEADER + '#EXTINF:-1 tvg-name="咪咕体育"\nhttps://sports.example/no-name.m3u8\n',
         "/sports-no-survivors.m3u": playlist([SPORTS_PAIRS["guide"], SPORTS_PAIRS["blacklisted"]]),
+        "/bbc.m3u": playlist(
+            BBC_PAIRS.values(),
+            header='#EXTM3U x-tvg-url="https://bbc.example/guide.xml"\n\n# upstream bbc comment\n',
+        ) + "\n",
+        "/bbc-bad-header.m3u": playlist(BBC_PAIRS.values(), header="not an M3U\n"),
+        "/bbc-empty.m3u": HEADER,
+        "/bbc-unpaired.m3u": playlist([BBC_PAIRS["first"]]) + SPORT,
+        "/bbc-invalid-name.m3u": HEADER + '#EXTINF:-1 tvg-name="BBC"\nhttps://bbc.example/no-name.m3u8\n',
+        "/bbc-no-survivors.m3u": playlist([BBC_PAIRS["guide"], BBC_PAIRS["blacklisted"]]),
         **malformed,
     }
 
@@ -368,6 +469,74 @@ def main():
             sports_fallback["IPTV_SRC_SPORTS"] = upstream + "/sports-bad-header.m3u"
             preserves_output(sports_fallback)
 
+            # BBC append mirrors sports but is always last: the consumer order must be
+            # base group, sports group, bbc group. BBC pairs share tvg-id/name and overlap
+            # the base display names like sports do; neither dedup nor FCC may touch them.
+            bbc_outputs = []
+            for mode, include_mobile, expected_base in (
+                ("telecom-only", False, playlist(PRIMARY_PAIRS)),
+                ("mobile-only", False, mobile_only),
+                ("both", False, expected_supplemented(args.strategy, args.mobile_filters, fcc=False)),
+                ("multicast", False, expected_legacy()),
+                ("fcc", False, expected_fcc("huawei")),
+                ("fcc", True, expected_supplemented(args.strategy, args.mobile_filters)),
+            ):
+                settings = environment.copy()
+                settings.update({
+                    "IPTV_MODE": mode,
+                    "IPTV_SRC": upstream + "/primary.m3u",
+                    "IPTV_SRC_MOBILE": upstream + "/mobile.m3u",
+                    "IPTV_SRC_MULTICAST": upstream + ("/primary.m3u" if include_mobile else "/valid.m3u?feed=fixture"),
+                    "IPTV_SRC_SPORTS": upstream + "/sports.m3u?auth=source%26token",
+                    "IPTV_SRC_BBC": upstream + "/bbc.m3u?auth=source%26token",
+                    "IPTV_FCC_INCLUDE_MOBILE": "1" if include_mobile else "0",
+                    "IPTV_SPORTS": "1",
+                    "IPTV_BBC": "0",
+                })
+                request_count = len(requests)
+                run(settings, True)
+                assert playlist_content(destination) == expected_base + expected_sports(args.sports_filters)
+                assert not any(
+                    path.startswith("/bbc") for path in requests[request_count:]
+                ), f"disabled bbc reached the network in {mode}"
+
+                settings["IPTV_BBC"] = "1"
+                run(settings, True)
+                assert playlist_content(destination) == (
+                    expected_base + expected_sports(args.sports_filters) + expected_bbc(args.bbc_filters)
+                )
+                assert sum(
+                    line.startswith("#EXTM3U") for line in destination.read_text().splitlines()
+                ) == 1
+                bbc_outputs.append(settings)
+
+                broken = settings.copy()
+                broken["IPTV_SRC_BBC"] = upstream + "/bbc-bad-header.m3u"
+                preserves_output(broken)
+
+            # Exercise all bbc failure gates against the combined FCC + mobile output.
+            # No intermediate primary, primary+mobile or sports list may replace the old
+            # destination: bbc aborts exactly like the sports stage.
+            bbc_failures = [
+                "/bbc-missing.m3u", "/bbc-empty.m3u",
+                "/bbc-unpaired.m3u", "/bbc-invalid-name.m3u",
+            ]
+            if args.bbc_filters:
+                bbc_failures.append("/bbc-no-survivors.m3u")
+            for route in bbc_failures:
+                settings = bbc_outputs[-1].copy()
+                settings["IPTV_SRC_BBC"] = upstream + route
+                preserves_output(settings)
+
+            bbc_fallback = bbc_outputs[-1].copy()
+            bbc_fallback["IPTV_SRC_MOBILE"] = upstream + "/mobile-bad-header.m3u"
+            run(bbc_fallback, True)
+            assert playlist_content(destination) == (
+                expected_primary_fcc() + expected_sports(args.sports_filters) + expected_bbc(args.bbc_filters)
+            )
+            bbc_fallback["IPTV_SRC_BBC"] = upstream + "/bbc-bad-header.m3u"
+            preserves_output(bbc_fallback)
+
             invalid_config = [
                 ("IPTV_FCC_GATEWAY", None),
                 ("IPTV_FCC_GATEWAY", ""),
@@ -388,6 +557,9 @@ def main():
                 ("IPTV_SPORTS", ""),
                 ("IPTV_SPORTS", "true"),
                 ("IPTV_SPORTS", "2"),
+                ("IPTV_BBC", ""),
+                ("IPTV_BBC", "true"),
+                ("IPTV_BBC", "2"),
             ]
             for key, value in invalid_config:
                 settings = environment.copy()
@@ -403,12 +575,16 @@ def main():
                     settings["IPTV_SRC_MULTICAST"] = upstream + route
                     preserves_output(settings)
 
+            check_module_unit_names(Path(__file__).resolve().parents[2])
+
             print(
                 f"PASS: FCC conversion/query preservation, {args.strategy} mobile supplementation "
                 f"(configured filters={args.mobile_filters}), unchanged mobile URLs/source order, "
                 "mobile failure fallback, additive sports in all five modes including FCC+mobile "
                 f"(configured sports filters={args.sports_filters}), disabled sports without fetching, "
-                "sports failure atomic preservation, legacy multicast, invalid config and malformed sources"
+                "sports failure atomic preservation, additive bbc after sports in all five modes "
+                f"(configured bbc filters={args.bbc_filters}), disabled bbc without fetching, "
+                "bbc failure atomic preservation, legacy multicast, invalid config and malformed sources"
             )
     finally:
         server.shutdown()

@@ -22,11 +22,23 @@ services.iptv-merge.outputs = [
     udpxy = "proxy.example:4022";
     outputPath = "/srv/iptv/edge-sports.m3u";
   }
+  {
+    name = "edge";
+    mode = "multicast";
+    sports = true;
+    bbc = true;
+    udpxy = "proxy.example:4022";
+    outputPath = "/srv/iptv/edge-sports-bbc.m3u";
+  }
 ];
 ```
 
-上例生成 `iptv-multicast-edge-sync`、`iptv-multicast-edge-sports-sync`
-两组 oneshot service 与 timer，共用模块的订阅源、过滤和定时配置。
+上例生成 `iptv-multicast-edge-sync`、`iptv-multicast-edge-sports-sync`、
+`iptv-multicast-edge-sports-bbc-sync` 三组 oneshot service 与 timer，共用模块的订阅源、
+过滤和定时配置。`sports`/`bbc` 是逐输出的可选补充源开关（订阅地址与过滤规则分别在
+`services.iptv-merge.sports` / `services.iptv-merge.bbc` 配置），追加序固定为
+基础 → 体育 → BBC，单元名按 `-sports`、`-bbc` 后缀递进；两者失败语义相同——源不可用
+或校验不过时保留旧的完整清单，不发布缺少补充频道的半成品。
 `name` 默认 `null`，不改变原有五模式及体育变体的十个单元名。
 显式标识只允许小写字母、数字和分段用的单连字符；输出路径与最终单元名均须唯一，
 完整 service 单元名最长 255 字节。名称碰撞按最终结果检查：

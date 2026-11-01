@@ -22,10 +22,16 @@
 , sportsRequirePattern ? "."
 , sportsBlacklist ? []
 , sportsDropGroups ? []
+, bbcUrl ? ""
+, bbcMinChannels ? 1
+, bbcRequirePattern ? "."
+, bbcBlacklist ? []
+, bbcDropGroups ? []
 , telecomSourceLabel ? "telecom"
 , mobileSourceLabel ? "mobile"
 , multicastSourceLabel ? "multicast"
 , sportsSourceLabel ? "sports"
+, bbcSourceLabel ? "bbc"
 }:
 writeShellScriptBin "iptv-merge" ''
   # 五种 mode（由各 systemd 单元通过 IPTV_MODE 选择，可同时发布不同模式）:
@@ -34,14 +40,15 @@ writeShellScriptBin "iptv-merge" ''
   #   - "mobile-only"  只拉取第二源
   #   - "multicast"    使用组播订阅源，可添加 udpxy 地址
   #   - "fcc"          复用组播过滤，主源 URL 转为 rtp2httpd RTP + FCC，可选补充移动源
-  # 每种模式均可用 IPTV_SPORTS=1 追加独立体育源；不参与基础源的去重或 URL 转换。
+  # 每种模式均可用 IPTV_SPORTS=1 / IPTV_BBC=1 追加独立体育/BBC 源（追加序：基础 → 体育 → BBC）；
+  # 均不参与基础源的去重或 URL 转换。
   # 失败语义（同目录 mktemp+mv 原子替换、trap 双清临时件，任一失败 DST 保旧）:
   #   - 电信阶段（下载/校验/过滤）失败 → 整体 abort
   #   - "both" / 启用移动补充的 "fcc"：移动阶段失败 → stderr 打 WARN、跳过移动、仍发布主源
   #   - "mobile-only" 阶段失败 → 整体 abort
-  #   - 启用体育补充：下载/校验/过滤失败 → 整体 abort，禁止提前发布基础源
+  #   - 启用体育/BBC 补充：下载/校验/过滤失败 → 整体 abort，禁止提前发布基础源
   #
-  # 单元必须设置 IPTV_MODE/IPTV_DST；IPTV_SRC / IPTV_SRC_MOBILE / IPTV_SRC_MULTICAST / IPTV_SRC_SPORTS 可覆盖源 URL。
+  # 单元必须设置 IPTV_MODE/IPTV_DST；IPTV_SRC / IPTV_SRC_MOBILE / IPTV_SRC_MULTICAST / IPTV_SRC_SPORTS / IPTV_SRC_BBC 可覆盖源 URL。
   #
   # 假设【契约】: 黑名单与 dropGroups 元素均为字面文本，不含 "|" 且不含单引号——
   #   包内 lib.concatStringsSep "|" 拼接后分别作 awk 动态正则（bl）与 split 成员匹配串（gs），
@@ -60,6 +67,12 @@ writeShellScriptBin "iptv-merge" ''
   case "$SPORTS" in
     0|1) ;;
     *) echo 'iptv-merge: IPTV_SPORTS must be 0 or 1' >&2; exit 1 ;;
+  esac
+  SRC_BB="''${IPTV_SRC_BBC:-${bbcUrl}}"
+  BBC="''${IPTV_BBC-0}"
+  case "$BBC" in
+    0|1) ;;
+    *) echo 'iptv-merge: IPTV_BBC must be 0 or 1' >&2; exit 1 ;;
   esac
   UDPXY="''${IPTV_UDPXY:-}"
   if [ "$MODE" = "fcc" ]; then
@@ -118,6 +131,11 @@ writeShellScriptBin "iptv-merge" ''
   SP_REQ="${sportsRequirePattern}"
   SP_BL="${if sportsBlacklist == [] then "^$" else lib.concatStringsSep "|" sportsBlacklist}"
   SP_GS="${lib.concatStringsSep "|" sportsDropGroups}"
+  # 可选 BBC 补充源参数（与体育同构，追加序在其后）
+  BB_MIN="${toString bbcMinChannels}"
+  BB_REQ="${bbcRequirePattern}"
+  BB_BL="${if bbcBlacklist == [] then "^$" else lib.concatStringsSep "|" bbcBlacklist}"
+  BB_GS="${lib.concatStringsSep "|" bbcDropGroups}"
   STRATEGY="${mergeStrategy}"
 
   # ---- 模式合法性先于任何文件动作（未知模式 fail-fast，不碰 DST 目录）----
@@ -131,8 +149,9 @@ writeShellScriptBin "iptv-merge" ''
   FILT=""; STAT=""; TMPM=""; SANM=""; FILTM=""; STAT_M=""; STAT_MG=""; MRG=""
   TMPMC=""; FILTMC=""; STAT_MC=""
   TMPSP=""; SANSP=""; FILTSP=""; STAT_SP=""
-  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC" "$TMPSP" "$SANSP" "$FILTSP" "$STAT_SP"' EXIT
-  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC" "$TMPSP" "$SANSP" "$FILTSP" "$STAT_SP"; exit 1' HUP INT TERM
+  TMPBB=""; SANBB=""; FILTBB=""; STAT_BB=""
+  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC" "$TMPSP" "$SANSP" "$FILTSP" "$STAT_SP" "$TMPBB" "$SANBB" "$FILTBB" "$STAT_BB"' EXIT
+  trap 'rm -f "$TMP" "$TMP.hdr" "$FILT" "$STAT" "$TMPM" "$SANM" "$FILTM" "$FILTM.hdr" "$STAT_M" "$STAT_MG" "$MRG" "$MRG.hdr" "$TMPMC" "$TMPMC.hdr" "$FILTMC" "$STAT_MC" "$TMPSP" "$SANSP" "$FILTSP" "$STAT_SP" "$TMPBB" "$SANBB" "$FILTBB" "$STAT_BB"; exit 1' HUP INT TERM
 
   # v3-filter-begin —— 以下至 v3-filter-end 为底本 v3 过滤阶段（测试提取锚点，勿删）
   # 2.5) awk 单趟过滤：主规则只分类采集，判决与统计集中在 END 一趟完成（不回读文件、原序可回放）
@@ -270,7 +289,7 @@ writeShellScriptBin "iptv-merge" ''
       }
     ' "$1" > "$2"
   }
-  # v3-filter-end（四个源共用结构/黑名单/组规则；体育不启用基础源去重，统计格式不变）
+  # v3-filter-end（五个源共用结构/黑名单/组规则；体育/BBC 不启用基础源去重，统计格式不变）
 
   # ---- 第一源阶段（telecom-only / both 共用；任一失败整体 abort 保旧）----
   telecom_stage() {
@@ -347,7 +366,30 @@ writeShellScriptBin "iptv-merge" ''
     rm -f "$TMPSP" "$SANSP" "$STAT_SP"; TMPSP=""; SANSP=""; STAT_SP=""
   }
 
-  # 所有基础模式只在此发布：先完成体育源，再加单个状态行，最后同目录原子替换。
+  # ---- BBC 补充源：与体育同构，仅名字/分组过滤；追加序在体育组之后 ----
+  bbc_stage() {
+    TMPBB=$(mktemp "''${DST%/*}/.iptv-bbc.XXXXXX")
+    SANBB=$(mktemp "''${DST%/*}/.iptv-bbcsan.XXXXXX")
+    FILTBB=$(mktemp "''${DST%/*}/.iptv-bbcfilt.XXXXXX")
+    STAT_BB=$(mktemp "''${DST%/*}/.iptv-bbcstats.XXXXXX")
+    curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 10 "$SRC_BB" -o "$TMPBB"
+    # 与移动源相同：只丢空行和非 EXTINF 注释，EXTINF 与 URL 原样交给结构校验。
+    awk 'NR == 1 { print; next }
+         /^[[:space:]]*$/ { next }
+         /^#/ { if ($0 !~ /^#EXTINF/) next; print; next }
+         { print }' "$TMPBB" > "$SANBB"
+    head -n1 "$SANBB" | grep -q '^#EXTM3U' || { echo 'bbc: bad header' >&2; exit 1; }
+    [ "$(grep -c '^#EXTINF' "$SANBB")" -ge "$BB_MIN" ] || { echo 'bbc: too few channels' >&2; exit 1; }
+    grep -qE "$BB_REQ" "$SANBB" || { echo 'bbc: missing required pattern' >&2; exit 1; }
+    filter_stage "$SANBB" "$FILTBB" "$STAT_BB" "$BB_BL" "$BB_GS" 0 1
+    read -r bb_blk bb_sib bb_blo bb_dpb bb_grp < "$STAT_BB"
+    b_black=''${bb_blk#blacklist=}
+    b_grp=''${bb_grp#group=}
+    b_kept=$(grep -c '^#EXTINF' "$FILTBB")
+    rm -f "$TMPBB" "$SANBB" "$STAT_BB"; TMPBB=""; SANBB=""; STAT_BB=""
+  }
+
+  # 所有基础模式只在此发布：先完成体育/BBC 源（按追加序），再加单个状态行，最后同目录原子替换。
   publish_output() {
     local candidate="$1"
     if [ "$SPORTS" = "1" ]; then
@@ -355,6 +397,12 @@ writeShellScriptBin "iptv-merge" ''
       tail -n +2 "$FILTSP" >> "$candidate"
       rm -f "$FILTSP"; FILTSP=""
       UPD="$UPD sports=${sportsSourceLabel} sports_kept=$s_kept sports_filtered_out:blacklist=$s_black group=$s_grp"
+    fi
+    if [ "$BBC" = "1" ]; then
+      bbc_stage
+      tail -n +2 "$FILTBB" >> "$candidate"
+      rm -f "$FILTBB"; FILTBB=""
+      UPD="$UPD bbc=${bbcSourceLabel} bbc_kept=$b_kept bbc_filtered_out:blacklist=$b_black group=$b_grp"
     fi
     UPD="# updated $(date -u +%FT%TZ) channels=$(grep -c '^#EXTINF' "$candidate") $UPD"
     { head -n1 "$candidate"; echo "$UPD"; tail -n +2 "$candidate"; } > "$candidate.hdr"

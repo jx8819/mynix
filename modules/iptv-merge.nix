@@ -26,10 +26,16 @@ let
     sportsRequirePattern = cfg.sports.requirePattern;
     sportsBlacklist = cfg.sports.blacklist;
     sportsDropGroups = cfg.sports.dropGroups;
+    bbcUrl = cfg.bbc.url;
+    bbcMinChannels = cfg.bbc.minChannels;
+    bbcRequirePattern = cfg.bbc.requirePattern;
+    bbcBlacklist = cfg.bbc.blacklist;
+    bbcDropGroups = cfg.bbc.dropGroups;
     telecomSourceLabel = cfg.telecom.sourceLabel;
     mobileSourceLabel = cfg.mobile.sourceLabel;
     multicastSourceLabel = cfg.multicast.sourceLabel;
     sportsSourceLabel = cfg.sports.sourceLabel;
+    bbcSourceLabel = cfg.bbc.sourceLabel;
   };
 
   servicePath = [ pkgs.bash pkgs.curl pkgs.gnugrep pkgs.gnused pkgs.gawk pkgs.coreutils ];
@@ -46,7 +52,8 @@ let
       base = lib.removeSuffix "-sync" unitNames.${output.mode};
       instance = lib.optionalString (output.name != null) "-${output.name}";
       sports = lib.optionalString output.sports "-sports";
-    in "${base}${instance}${sports}-sync";
+      bbc = lib.optionalString output.bbc "-bbc";
+    in "${base}${instance}${sports}${bbc}-sync";
 
   mkServiceConfig = outputPath: {
     Type = "oneshot";
@@ -88,7 +95,7 @@ in
             default = null;
             description = ''
               可选稳定实例标识：小写英文字母或数字，以单个连字符分段。
-              插入基础单元名与 sports/sync 后缀之间；null 保留原命名。
+              插入基础单元名与 sports/bbc/sync 后缀之间；null 保留原命名。
               最终完整 service 单元名不得超过 255 字节，且不能与其他输出重名。
             '';
           };
@@ -100,6 +107,11 @@ in
             type = types.bool;
             default = false;
             description = "在基础模式转换/合并完成后追加独立体育源；失败时保留完整旧产物。";
+          };
+          bbc = mkOption {
+            type = types.bool;
+            default = false;
+            description = "在基础模式转换/合并及体育源之后追加独立 BBC 源；失败时保留完整旧产物。";
           };
           outputPath = mkOption {
             type = types.str;
@@ -278,6 +290,40 @@ in
       };
     };
 
+    # 可选 BBC 补充源；站点自行指定订阅地址和过滤规则。
+    bbc = {
+      url = mkOption {
+        type = types.str;
+        default = "";
+        description = "BBC 补充源订阅 URL，仅 bbc = true 的输出拉取。";
+      };
+      sourceLabel = mkOption {
+        type = types.str;
+        default = "bbc";
+        description = "BBC 补充源在生成的 M3U # updated 行内的标识。";
+      };
+      minChannels = mkOption {
+        type = types.int;
+        default = 1;
+        description = "BBC 源最少 #EXTINF 条数，低于则拒收保旧。";
+      };
+      requirePattern = mkOption {
+        type = types.str;
+        default = ".";
+        description = "BBC 源必须包含的 URL 特征（不匹配则拒收）。";
+      };
+      blacklist = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "BBC 源显示名（EXTINF 逗号后）黑名单，不按 tvg-name 或 tvg-id 过滤。";
+      };
+      dropGroups = mkOption {
+        type = types.listOf types.str;
+        default = [];
+        description = "按 group-title 精确匹配整组剔除的分组名。";
+      };
+    };
+
     # 合并策略（both 或启用 fcc.includeMobile 时移动源的取舍规则）
     merge = {
       strategy = mkOption {
@@ -338,7 +384,7 @@ in
     assertions = [
       {
         assertion = lib.length (lib.unique (map unitName cfg.outputs)) == lib.length cfg.outputs;
-        message = "services.iptv-merge.outputs must generate unique systemd unit names (including instance names and sports suffixes)";
+        message = "services.iptv-merge.outputs must generate unique systemd unit names (including instance names and sports/bbc suffixes)";
       }
       {
         assertion = lib.all (output: builtins.stringLength "${unitName output}.service" <= 255) cfg.outputs;
@@ -382,6 +428,7 @@ in
       environment = {
         IPTV_MODE = output.mode;
         IPTV_SPORTS = if output.sports then "1" else "0";
+        IPTV_BBC = if output.bbc then "1" else "0";
         IPTV_DST = output.outputPath;
       } // lib.optionalAttrs (output.udpxy != null) {
         IPTV_UDPXY = output.udpxy;
