@@ -10,7 +10,9 @@ import subprocess
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.error import HTTPError
 from urllib.parse import urlsplit
+from urllib.request import ProxyHandler, build_opener
 
 
 HEADER = '#EXTM3U x-tvg-url="https://epg.example/guide.xml?fcc=metadata"\n'
@@ -54,7 +56,8 @@ SPORTS_PAIRS = {
               "https://sports.example/hosts.txt?format=m3u#guide"),
     "first": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" tvg-logo="https://logo.example/sports,preview.png" group-title="Sport",News\n',
               "https://sports.example//index.m3u8?token=a%26b&fcc=provider%3A9000&fcc-type=source#main"),
-    "blacklisted": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Sport",睛彩竞技\n',
+    "blacklisted": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Sport",睛彩竞技\n'
+                    '#EXTVLCOPT:http-referrer=https://sports.example/excluded-only/\n',
                     "https://sports.example/excluded.m3u8?token=original"),
     "last": ('#EXTINF:-1 tvg-id="sports" tvg-name="咪咕体育" group-title="Sport",News标清\n',
              "http://sports.example:4022/udp/239.30.0.2:1234?token=second&fcc=original#track"),
@@ -64,7 +67,8 @@ BBC_PAIRS = {
               "https://bbc.example/hosts.txt?format=m3u#guide"),
     "first": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" tvg-logo="https://logo.example/bbc,preview.png" group-title="Sport",News\n',
               "https://bbc.example//index.m3u8?token=a%26b&fcc=provider%3A9000&fcc-type=source#main"),
-    "blacklisted": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" group-title="Sport",睛彩竞技\n',
+    "blacklisted": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" group-title="Sport",睛彩竞技\n'
+                    '#EXTHTTP:{"Referer":"https://bbc.example/excluded-only/"}\n',
                     "https://bbc.example/excluded.m3u8?token=original"),
     "last": ('#EXTINF:-1 tvg-id="bbc" tvg-name="BBC" group-title="Sport",News标清\n',
              "http://bbc.example:4022/udp/239.30.0.2:1234?token=second&fcc=original#track"),
@@ -147,6 +151,46 @@ def playlist_content(path):
         line for line in path.read_text().splitlines(keepends=True)
         if not line.startswith("# ")
     )
+
+
+def reference_entry(path, display_name):
+    """Read the standard per-entry HTTP options as a playlist consumer would."""
+    selected = False
+    headers = {}
+    directives = []
+    for line in path.read_text().splitlines():
+        if line.startswith("#EXTINF:"):
+            selected = line.rsplit(",", 1)[-1] == display_name
+            headers = {}
+            directives = []
+        elif selected and line.startswith("#"):
+            directives.append(line)
+            if line.startswith("#EXTVLCOPT:"):
+                key, separator, value = line[len("#EXTVLCOPT:"):].partition("=")
+                if separator and key in ("http-referrer", "http-user-agent"):
+                    headers[{"http-referrer": "Referer", "http-user-agent": "User-Agent"}[key]] = value
+            elif line.startswith("#EXTHTTP:"):
+                headers.update(json.loads(line[len("#EXTHTTP:"):]))
+        elif selected and line:
+            return line, headers, directives
+    raise AssertionError(f"published playlist has no complete {display_name} entry")
+
+
+def consume_video(ffmpeg, url, headers):
+    """A real demux/decode, not a successful fetch of an arbitrary response body."""
+    options = []
+    if headers:
+        options = ["-headers", "".join(f"{key}: {value}\r\n" for key, value in headers.items())]
+    result = subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-loglevel", "error", *options,
+         "-i", url, "-map", "0:v:0", "-frames:v", "1", "-f", "framemd5", "-"],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "http_proxy": "", "no_proxy": "127.0.0.1,localhost"},
+    )
+    if result.returncode != 0 or not any(
+        line.startswith("0,") for line in result.stdout.splitlines()
+    ):
+        raise AssertionError(f"published entry did not decode video:\n{result.stderr}\n{result.stdout}")
 
 
 def check_module_unit_names(repo_root):
@@ -239,10 +283,30 @@ def main():
         "--bbc-filters", action="store_true",
         help='expect bbcBlacklist=["睛彩", "说明"] (neutral bbc defaults otherwise)',
     )
+    parser.add_argument(
+        "--ffmpeg", type=Path, default=shutil.which("ffmpeg"),
+        help="ffmpeg used to generate and decode local protected MPEG-TS (default: PATH)",
+    )
     args = parser.parse_args()
     executable = args.executable.resolve()
     if not executable.is_file() or not os.access(executable, os.X_OK):
         raise SystemExit(f"not an executable file: {executable}")
+    if args.ffmpeg is None or not args.ffmpeg.is_file():
+        raise SystemExit("ffmpeg is required; supply --ffmpeg /path/to/ffmpeg")
+    ffmpeg = args.ffmpeg.resolve()
+    media = subprocess.run(
+        [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+         "-i", "color=c=blue:s=32x32:r=25", "-t", "1", "-c:v", "mpeg2video",
+         "-f", "mpegts", "pipe:1"],
+        capture_output=True, check=True, timeout=30,
+    ).stdout
+    assert media, "ffmpeg produced an empty media fixture"
+    required_headers = {
+        "Referer": "https://stmify.com/",
+        "User-Agent": "IPTV-merge-reference-consumer/1.0",
+    }
+    media_requests = []
+    local_http = build_opener(ProxyHandler({}))
 
     requests = []
     malformed = {
@@ -293,6 +357,18 @@ def main():
         def do_GET(self):
             request = urlsplit(self.path)
             requests.append(request.path)
+            if request.path in ("/protected/f1.ts", "/protected/nfl.ts"):
+                allowed = all(self.headers.get(key) == value for key, value in required_headers.items())
+                media_requests.append((request.path, allowed))
+                if not allowed:
+                    self.send_error(403, "Access Denied: Unauthorized domain.")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "video/mp2t")
+                self.send_header("Content-Length", str(len(media)))
+                self.end_headers()
+                self.wfile.write(media)
+                return
             if request.path in fixtures:
                 body = fixtures[request.path]
             else:
@@ -317,6 +393,35 @@ def main():
             destination = root / "out.m3u"
             upstream = f"http://127.0.0.1:{server.server_port}"
             environment = {key: value for key, value in os.environ.items() if not key.startswith("IPTV_")}
+            f1_directives = [
+                "#EXTVLCOPT:http-referrer=" + required_headers["Referer"],
+                "#EXTVLCOPT:http-user-agent=" + required_headers["User-Agent"],
+                "#EXTVLCOPT:network-caching=1000",
+                "#KODIPROP:inputstream=inputstream.ffmpegdirect",
+                "# channel comment",
+            ]
+            nfl_directives = ["#EXTHTTP:" + json.dumps(required_headers)]
+            fixtures["/protected-channels.m3u"] = (
+                '#EXTM3U x-tvg-url="https://guide.example/uk.xml"\n'
+                '#EXTVLCOPT:http-referrer=https://wrong-global.example/\n'
+                '#EXTHTTP:{"User-Agent":"wrong-global-agent"}\n'
+                '#EXTINF:-1 tvg-id="SkySportsF1.uk" group-title="UK",Sky Sports F1\n'
+                + "\n".join(f1_directives) + "\n"
+                + upstream + "/protected/f1.ts?token=a%26b&quality=high\n"
+                '#EXTINF:-1 tvg-id="SkySportsNFL.uk" group-title="UK",Sky Sports NFL\n'
+                + "\n".join(nfl_directives) + "\n"
+                + upstream + "/protected/nfl.ts?token=c%26d&quality=high\n"
+            )
+            fixtures["/options-unpaired.m3u"] = (
+                HEADER + NEWS + "\n".join(f1_directives) + "\n"
+            )
+            fixtures["/options-nested.m3u"] = (
+                HEADER + NEWS + "\n".join(f1_directives) + "\n"
+                + SPORT + upstream + "/protected/f1.ts\n"
+            )
+            fixtures["/options-extra-header.m3u"] = (
+                HEADER + NEWS + "#EXTM3U\n" + upstream + "/protected/f1.ts\n"
+            )
             environment.update({
                 "IPTV_MODE": "fcc",
                 "IPTV_DST": str(destination),
@@ -537,6 +642,38 @@ def main():
             bbc_fallback["IPTV_SRC_BBC"] = upstream + "/bbc-bad-header.m3u"
             preserves_output(bbc_fallback)
 
+            # Playback regression at the published consumer boundary: removing HTTP options
+            # yields 403, while the complete entry must actually demux/decode local MPEG-TS.
+            # Exercise both supplementary sanitizers in every mode, including FCC+mobile.
+            for source_key in ("IPTV_SRC_SPORTS", "IPTV_SRC_BBC"):
+                for base in bbc_outputs:
+                    settings = base.copy()
+                    settings[source_key] = upstream + "/protected-channels.m3u"
+                    run(settings, True)
+                    assert destination.read_text().count("#EXTM3U") == 1
+                    for name, route, expected_directives in (
+                        ("Sky Sports F1", "/protected/f1.ts?token=a%26b&quality=high", f1_directives),
+                        ("Sky Sports NFL", "/protected/nfl.ts?token=c%26d&quality=high", nfl_directives),
+                    ):
+                        url, headers, directives = reference_entry(destination, name)
+                        assert url == upstream + route
+                        assert headers == required_headers
+                        assert directives == expected_directives
+                        try:
+                            with local_http.open(url, timeout=5):
+                                raise AssertionError("protected media accepted missing playlist options")
+                        except HTTPError as error:
+                            assert error.code == 403
+                        before = len(media_requests)
+                        consume_video(ffmpeg, url, headers)
+                        assert any(allowed for _, allowed in media_requests[before:])
+                    for route in (
+                        "/options-unpaired.m3u", "/options-nested.m3u", "/options-extra-header.m3u",
+                    ):
+                        broken = settings.copy()
+                        broken[source_key] = upstream + route
+                        preserves_output(broken)
+
             invalid_config = [
                 ("IPTV_FCC_GATEWAY", None),
                 ("IPTV_FCC_GATEWAY", ""),
@@ -584,7 +721,8 @@ def main():
                 f"(configured sports filters={args.sports_filters}), disabled sports without fetching, "
                 "sports failure atomic preservation, additive bbc after sports in all five modes "
                 f"(configured bbc filters={args.bbc_filters}), disabled bbc without fetching, "
-                "bbc failure atomic preservation, legacy multicast, invalid config and malformed sources"
+                "bbc failure atomic preservation, protected per-entry HTTP options with real media decode, "
+                "legacy multicast, invalid config and malformed sources"
             )
     finally:
         server.shutdown()

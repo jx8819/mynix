@@ -39,6 +39,8 @@ services.iptv-merge.outputs = [
 `services.iptv-merge.sports` / `services.iptv-merge.bbc` 配置），追加序固定为
 基础 → 体育 → BBC，单元名按 `-sports`、`-bbc` 后缀递进；两者失败语义相同——源不可用
 或校验不过时保留旧的完整清单，不发布缺少补充频道的半成品。
+体育 / BBC 附加源按完整 M3U 记录过滤和追加，保留每频道的 `#EXTVLCOPT`、
+`#EXTHTTP` 等播放选项，不把选项丢弃或串到下一频道；文件级前导行不作为频道选项追加。
 `name` 默认 `null`，不改变原有五模式及体育变体的十个单元名。
 显式标识只允许小写字母、数字和分段用的单连字符；输出路径与最终单元名均须唯一，
 完整 service 单元名最长 255 字节。名称碰撞按最终结果检查：
@@ -54,13 +56,18 @@ iptv-uk-sync \
   --source https://iptv-org.github.io/iptv/countries/uk.m3u \
   --output-dir /var/lib/iptv-uk \
   --proxy http://uk-proxy.example:3128 \
-  --workers 4 --timeout 8 --min-height 720
+  --workers 4 --timeout 8 --min-height 720 \
+  --bbc-service BBCOne.uk=bbc_one_london \
+  --bbc-service BBCNews.uk=bbc_news_channel_hd \
+  --exclude-id BBCNewsPashto.uk
 ```
 
 `--workers`、`--timeout`、`--min-height` 的默认值分别为 4、8 秒、720。
-显式代理不受 `NO_PROXY` 绕过。筛选依据是实际抽样视频高度，不是频道名中的
-“HD”；高度未知或低于门槛的流不入选。BBC One、BBC Two 各自合并地区和画质
-变体，只保留一个频道；BBC Scotland、时移频道仍是独立身份。
+显式代理不受 `NO_PROXY` 绕过。筛选依据是实际解码出的视频帧高度，不是频道名中的
+“HD”、容器声明的高度或非空 packet；只有音频帧不能证明视频可播。媒体前缀每路最多
+2 MiB，本地解码最长 10 秒；无法解码出视频帧、高度未知或低于门槛的流不入选。
+BBC One、BBC Two 各自合并地区和画质变体，只保留一个频道；
+BBC Scotland、时移频道仍是独立身份。
 
 HLS 会追踪变体、音视频 rendition、重定向、密钥与媒体请求的主机；公开可获取的
 16 字节 AES-128 密钥允许使用，但拒绝 DRM。明文 DASH 必须实际取得初始化段和
@@ -68,10 +75,24 @@ HLS 会追踪变体、音视频 rendition、重定向、密钥与媒体请求的
 IP 地址形式的播放依赖不支持仅靠 DNS 的分流，HLS Content Steering 也不支持，
 因此这两类不会作为已完整解析的可播放候选发布。
 
+可重复的 `--bbc-service TVG_ID=SERVICE` 从 BBC 官方 mediaselector 获取 H.264 HTTPS
+HLS 候选，验证后优先使用官方服务及稳定主 CDN；未配置时保留原有上游选择方式。
+`--bbc-api-template` 可覆盖带 `{service}` 占位符的 API 地址。
+`--exclude-id TVG_ID` 可重复，按不含 `@` 变体后缀的身份、不区分大小写排除，
+在请求媒体前生效；上例恢复英语 BBC News，并排除独立身份 BBC News Pashto。
+
+显式播放请求头在探测与导出时保持一致：识别旧 `http-referrer`、
+APTV 示例使用的 `http-referer` / `http-header` 以及 `http-user-agent`，
+保留原逐频道选项，并导出 Referer / User-Agent 的 APTV 行内字段。
+不会把默认探测 User-Agent 伪装成源声明的播放要求。
+EXTINF、VLC、EXTHTTP、Kodi 与 URL 尾部若声明相互矛盾的同名头则拒绝该候选，
+头名称不区分大小写，相同重复声明允许保留。
+
 输出目录是指向同代产物的原子切换符号链接，内含 `tv.m3u`、
 `tv-domains.txt` 与筛选报告 `report.json`；已有的真实目录会被拒绝，不会覆盖。
-新一代必须同时含 BBC One、BBC Two，且至少有 10 个符合条件的唯一频道，
-否则失败并保留全部旧产物。域名文件只收录最终选中频道的精确播放依赖主机，
+新一代必须同时含 BBC One、BBC Two、所有 `--bbc-service` 配置的频道身份，
+且至少有 10 个符合条件的唯一频道，否则失败并保留全部旧产物。
+域名文件只收录最终选中频道的精确播放依赖主机，
 不加入台标、源目录网站或宽泛的共享域名后缀。
 
 ## RouterOS 电视域名分流

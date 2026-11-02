@@ -3,7 +3,7 @@
 
 Only the output-directory symlink is switched at publication. All network I/O is
 bounded and goes through the explicitly supplied proxy (or directly for fixtures).
-Packaged ffprobe only demuxes bounded local samples for actual video-height proof;
+Packaged ffprobe only decodes bounded local samples for actual video-frame proof;
 cryptography decrypts public AES-128 CBC samples without treating prefixes as EOF.
 """
 
@@ -35,7 +35,8 @@ import xml.etree.ElementTree as ET
 MANIFEST_LIMIT = 2 * 1024 * 1024
 SOURCE_LIMIT = 4 * 1024 * 1024
 INIT_LIMIT = 512 * 1024
-MEDIA_LIMIT = 64 * 1024
+# A real HD IDR can exceed the old 64 KiB packet-inspection prefix.
+MEDIA_LIMIT = 2 * 1024 * 1024
 REQUEST_LIMIT = 128
 HLS_ROUTE_LIMIT = 32
 DASH_ROUTE_LIMIT = 32
@@ -46,6 +47,13 @@ ATTR_RE = re.compile(r'([\w-]+)\s*=\s*(?:"([^"]*)"|\x27([^\x27]*)\x27|([^\s,]+))
 QUALITY_SUFFIX = re.compile(r"^(?:SD|HD|FHD|UHD|[248]K|\d{3,4}p)$", re.I)
 BBC_CDN = re.compile(r"^vs-(?:cmaf|dash|hls)-[a-z0-9-]+-uk-live\.akamaized\.net$")
 MP4_ENCRYPTION = (b"pssh", b"encv", b"enca", b"sinf", b"tenc")
+VIDEO_CODECS = frozenset(("avc1", "avc2", "avc3", "avc4", "hvc1", "hev1", "av01",
+                          "vp08", "vp09", "mp4v", "dvh1", "dvhe", "dva1", "dvav", "dav1"))
+BBC_API_TEMPLATE = ("https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/"
+                    "mediaset/pc/vpid/{service}/format/json")
+BBC_CHANNELS = {"bbcone.uk": ("bbc-one", "BBC One"),
+                "bbctwo.uk": ("bbc-two", "BBC Two"),
+                "bbcnews.uk": ("bbc-news", "BBC News")}
 
 
 class ProbeError(Exception):
@@ -117,13 +125,14 @@ class Channel:
     attrs: dict
     options: tuple
     url: str
+    source_priority: int = 0
 
     @property
     def key(self):
         identity = self.attrs.get("tvg-id", "").strip()
         base, marker, variant = identity.partition("@")
-        if base.lower() in ("bbcone.uk", "bbctwo.uk") and not re.search(r"(?:plus|\+)\d+", variant, re.I):
-            return "bbc-one" if base.lower() == "bbcone.uk" else "bbc-two"
+        if base.lower() in BBC_CHANNELS and not re.search(r"(?:plus|\+)\d+", variant, re.I):
+            return BBC_CHANNELS[base.lower()][0]
         if identity:
             return "id:" + (base if marker and QUALITY_SUFFIX.fullmatch(variant) else identity).casefold()
         name = re.sub(r"\s*\[(?:geo-blocked|not 24/7)\]", "", self.name, flags=re.I)
@@ -134,7 +143,15 @@ class Channel:
 
     def render(self, url):
         metadata, _ = extinf_parts(self.extinf)
-        name = {"bbc-one": "BBC One", "bbc-two": "BBC Two"}.get(self.key, self.name)
+        name = next((label for key, label in BBC_CHANNELS.values() if key == self.key), self.name)
+        _, _, headers = playback_request(self, defaults=False)
+        for attr, header in (("http-referer", "Referer"), ("http-user-agent", "User-Agent")):
+            if header in headers and attr not in self.attrs:
+                value = headers[header]
+                quote = '"' if '"' not in value else "'" if "'" not in value else None
+                if quote is None:
+                    fail("Explicit HTTP control cannot be represented as an M3U attribute", "unsupported")
+                metadata += f" {attr}={quote}{value}{quote}"
         return "\n".join((metadata + "," + name, *self.options, url)) + "\n"
 
 
@@ -180,16 +197,42 @@ def parse_playlist(text, base_url):
     return header, channels
 
 
-def playback_request(channel):
+def playback_request(channel, defaults=True):
     url, separator, tail = channel.url.partition("|")
-    headers = {"User-Agent": DEFAULT_AGENT, "Accept-Encoding": "identity"}
+    headers = {"User-Agent": DEFAULT_AGENT, "Accept-Encoding": "identity"} if defaults else {}
     aliases = {"user-agent": "User-Agent", "http-user-agent": "User-Agent",
                "referer": "Referer", "referrer": "Referer", "http-referrer": "Referer",
                "http-referer": "Referer", "origin": "Origin", "http-origin": "Origin",
                "cookie": "Cookie", "http-cookie": "Cookie"}
-    for key, value in channel.attrs.items():
+    explicit = {}
+
+    def update(values):
+        for name, value in values:
+            name = aliases.get(name.lower(), name)
+            logical = name.casefold()
+            if logical in explicit and explicit[logical] != value:
+                fail("Conflicting explicit playback HTTP controls", "unsupported")
+            explicit[logical] = value
+            for existing in tuple(headers):
+                if existing.casefold() == name.casefold():
+                    del headers[existing]
+            headers[name] = value
+
+    def header_value(value):
+        # APTV's inline http-header uses '=', while VLC also accepts ':'.
+        match = re.fullmatch(r"\s*([^:=]+?)\s*[:=]\s*(.*)", value)
+        if not match:
+            fail("Invalid explicit HTTP header", "unsupported")
+        return match.groups()
+
+    metadata, _ = extinf_parts(channel.extinf)
+    for match in ATTR_RE.finditer(metadata):
+        key = match.group(1).lower()
+        value = next(value for value in match.groups()[1:] if value is not None)
         if key in aliases:
-            headers[aliases[key]] = value
+            update(((key, value),))
+        elif key == "http-header":
+            update((header_value(value),))
     for option in channel.options:
         lower = option.lower()
         if lower.startswith("#kodiprop:") and any(part in lower for part in
@@ -198,24 +241,23 @@ def playback_request(channel):
         if lower.startswith("#extvlcopt:"):
             key, _, value = option.partition(":")[2].partition("=")
             if key.lower() in aliases:
-                headers[aliases[key.lower()]] = value
-            elif key.lower() == "http-header" and ":" in value:
-                name, value = value.split(":", 1)
-                headers[name.strip()] = value.strip()
+                update(((key.lower(), value),))
+            elif key.lower() == "http-header":
+                update((header_value(value),))
         elif lower.startswith("#exthttp:"):
             try:
-                values = json.loads(option.partition(":")[2])
+                values = json.loads(option.partition(":")[2], object_pairs_hook=tuple)
             except (ValueError, TypeError):
                 fail("Invalid EXTHTTP request headers", "unsupported")
-            if not isinstance(values, dict) or any(not isinstance(v, str) for v in values.values()):
+            if not isinstance(values, tuple) or any(not isinstance(value, str) for _, value in values):
                 fail("Invalid EXTHTTP request headers", "unsupported")
-            headers.update(values)
+            update(values)
         elif lower.startswith("#kodiprop:inputstream.adaptive."):
             key, _, value = option.partition(":")[2].partition("=")
-            if key.endswith(("stream_headers", "manifest_headers")):
-                headers.update(parse_qsl(value, keep_blank_values=True))
+            if key.lower().endswith(("stream_headers", "manifest_headers")):
+                update(parse_qsl(value, keep_blank_values=True))
     if separator:
-        headers.update(parse_qsl(tail, keep_blank_values=True))
+        update(parse_qsl(tail, keep_blank_values=True))
     for name, value in headers.items():
         if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", name) or "\r" in value or "\n" in value:
             fail("Invalid playback HTTP header", "unsupported")
@@ -467,32 +509,44 @@ def hls_key(attrs, base, client):
     return {"url": url, "iv": iv}
 
 
-def inspect_local_media(path, ffprobe):
-    """Demux local bounded bytes only; never let ffprobe make network requests."""
+def inspect_local_media(path, ffprobe, expected_type=None):
+    """Decode local bounded bytes only; never let ffprobe make network requests."""
     if not ffprobe:
-        fail("Media height proof requires the packaged local ffprobe", "unsupported")
+        fail("Media frame proof requires the packaged local ffprobe", "unsupported")
     command = [ffprobe, "-v", "error", "-protocol_whitelist", "file,data",
-               "-probesize", str(MEDIA_LIMIT), "-analyzeduration", "1000000",
-               "-read_intervals", "%+0.25", "-show_entries",
-               "stream=codec_name,codec_type,width,height:packet=size", "-of", "json", str(path)]
+               "-probesize", str(MEDIA_LIMIT + INIT_LIMIT), "-analyzeduration", "2000000",
+               "-show_frames", "-show_entries",
+               "stream=codec_type:frame=media_type,width,height,pix_fmt,nb_samples,decode_error_flags",
+               "-of", "json", str(path)]
     try:
         result = subprocess.run(command, capture_output=True, timeout=10, check=False)
         proof = json.loads(result.stdout)
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        fail("Local bounded ffprobe media inspection failed")
-    streams = proof.get("streams", [])
-    if (result.returncode or not any(stream.get("codec_type") in ("video", "audio") and
-            stream.get("codec_name") not in (None, "unknown") for stream in streams) or
-            not any(int(packet.get("size", 0)) > 0 for packet in proof.get("packets", []))):
-        fail("Bounded media did not yield recognizable local streams and packets")
-    return max((int(stream.get("height", 0)) for stream in streams if stream.get("codec_type") == "video"), default=0)
+        fail("Local bounded ffprobe media decoding failed")
+    frames = [frame for frame in proof.get("frames", [])
+              if not int(frame.get("decode_error_flags", 0))]
+    video = [int(frame.get("height", 0)) for frame in frames
+             if frame.get("media_type") == "video" and int(frame.get("width", 0)) > 0 and
+             int(frame.get("height", 0)) > 0 and frame.get("pix_fmt") not in (None, "none", "unknown")]
+    audio = any(frame.get("media_type") == "audio" and int(frame.get("nb_samples", 0)) > 0
+                for frame in frames)
+    if expected_type == "audio" and not audio:
+        fail("Bounded audio rendition yielded no decoded audio frames")
+    if expected_type == "video" or any(stream.get("codec_type") == "video" for stream in proof.get("streams", [])):
+        if not video:
+            fail("Bounded media yielded no decoded video frames", "unknown-resolution")
+    if not video and not audio:
+        fail("Bounded media yielded no decoded audio or video frames")
+    # A truncated final packet may set a demuxer error despite an earlier real
+    # decoded frame. Only decoded frames, never stream headers, prove height.
+    return max(video, default=0)
 
 
-def clear_media_height(data, init, ffprobe):
+def clear_media_height(data, init, ffprobe, expected_type=None):
     with tempfile.TemporaryDirectory(prefix="iptv-uk-media-") as directory:
         path = Path(directory) / ("sample.mp4" if init is not None else "sample.ts")
         path.write_bytes((init or b"") + data)
-        return inspect_local_media(path, ffprobe)
+        return inspect_local_media(path, ffprobe, expected_type)
 
 
 def require_height(height, minimum):
@@ -530,15 +584,15 @@ class Proof:
     detail: str = ""
 
 
-def hls_child(client, url, ffprobe, depth, inspect_only=False):
-    cache_key = (url, inspect_only)
+def hls_child(client, url, ffprobe, depth, inspect_only=False, expected_type=None):
+    cache_key = (url, inspect_only, expected_type)
     if cache_key not in client.hls_proofs:
         client.hls_proofs[cache_key] = probe_hls(
-            client, client.fetch(url), ffprobe, 0, depth, inspect_only)
+            client, client.fetch(url), ffprobe, 0, depth, inspect_only, expected_type)
     return client.hls_proofs[cache_key]
 
 
-def probe_hls(client, fetched, ffprobe, min_height, depth=0, inspect_only=False):
+def probe_hls(client, fetched, ffprobe, min_height, depth=0, inspect_only=False, expected_type=None):
     if depth > 4:
         fail("HLS nesting exceeds the probe limit", "probe-limit")
     text = text_manifest(fetched)
@@ -619,16 +673,21 @@ def probe_hls(client, fetched, ffprobe, min_height, depth=0, inspect_only=False)
         # The published URL remains the original master. Every selectable child
         # must therefore be inspected, not just the first successful rendition.
         for attrs, url in sorted(variants, key=rank):
-            proof = hls_child(client, url, ffprobe, depth + 1, inspect_only)
+            has_video = ("RESOLUTION" in attrs or any(
+                codec.strip().lower().partition(".")[0] in VIDEO_CODECS
+                for codec in attrs.get("CODECS", "").split(",")))
+            kind = expected_type or ("video" if has_video else None)
+            proof = hls_child(client, url, ffprobe, depth + 1, inspect_only, kind)
             quality = rank((attrs, url))
             proofs.append(Proof("hls", proof.height, max(proof.bandwidth, -quality[1]),
-                                "verified all HLS renditions/init/media and local codec-header height"))
+                                "verified all HLS renditions/init/media and actual decoded frames"))
         for rendition in renditions:
             if rendition.get("URI"):
+                kind = rendition.get("TYPE", "").lower()
                 hls_child(client, urljoin(fetched.url, rendition["URI"]), ffprobe, depth + 1,
-                          inspect_only or rendition.get("TYPE") not in ("AUDIO", "VIDEO"))
+                          inspect_only or kind not in ("audio", "video"), kind)
         for url in iframe_routes:
-            hls_child(client, url, ffprobe, depth + 1, inspect_only)
+            hls_child(client, url, ffprobe, depth + 1, inspect_only, "video")
         proof = max(proofs, key=lambda item: (item.height, item.bandwidth))
         if min_height:
             require_height(proof.height, min_height)
@@ -659,8 +718,8 @@ def probe_hls(client, fetched, ffprobe, min_height, depth=0, inspect_only=False)
             fail("Subtitle rendition has no recognizable media", "nonmedia")
         return Proof("hls", detail="verified subtitle playlist and dependency media")
     valid_media(sample, init is not None)
-    height = clear_media_height(sample, init, ffprobe)
-    return Proof("hls", height, detail="verified actual media and local codec-header height")
+    height = clear_media_height(sample, init, ffprobe, expected_type)
+    return Proof("hls", height, detail="verified actual decoded media frames")
 
 
 def local_name(element):
@@ -851,7 +910,7 @@ def sidx_media(client, url, index_range):
     fail("DASH SegmentBase has no usable sidx media reference")
 
 
-def dash_representation(client, mpd, period, adaptation, representation, manifest_url, ffprobe):
+def dash_representation(client, mpd, period, adaptation, representation, manifest_url, ffprobe, media_type):
     nodes = (mpd, period, adaptation, representation)
     base = base_url(nodes, manifest_url, client)
     attrs, timeline, template = inherited(nodes, "SegmentTemplate")
@@ -903,9 +962,9 @@ def dash_representation(client, mpd, period, adaptation, representation, manifes
     valid_init(initialization)
     media = client.fetch(media_url, MEDIA_LIMIT, media_range, complete=False).data
     valid_media(media, has_init=True)
-    height = clear_media_height(media, initialization, ffprobe)
+    height = clear_media_height(media, initialization, ffprobe, media_type)
     return Proof("dash", height, int(representation.get("bandwidth", "0")),
-                 "verified clear MP4 init/media and local codec-header height")
+                 "verified clear MP4 init/media and actual decoded frames")
 
 
 def probe_dash(client, fetched, ffprobe, min_height):
@@ -951,7 +1010,7 @@ def probe_dash(client, fetched, ffprobe, min_height):
     # including lower resolutions, rather than hiding untested DRM/CDN routes
     # behind the first successful high-quality representation.
     for period, media_type, adaptation, representation in routes:
-        proof = dash_representation(client, mpd, period, adaptation, representation, fetched.url, ffprobe)
+        proof = dash_representation(client, mpd, period, adaptation, representation, fetched.url, ffprobe, media_type)
         if period is current_period and (media_type == "video" or proof.height > 0):
             proofs.append(proof)
     if not proofs:
@@ -968,6 +1027,83 @@ def bbc_hls_sibling(url):
             parts.path.endswith(".mpd")):
         return urlunsplit(parts._replace(path=parts.path.rsplit("/", 1)[0] + "/pc_hd_abr_v2.fmp4.m3u8"))
     return None
+
+
+def tvg_base_id(value):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", value):
+        raise argparse.ArgumentTypeError("TVG ID must be a base ID containing only letters, digits, '.', '_' or '-'")
+    return value
+
+
+def bbc_service(value):
+    identity, separator, service = value.partition("=")
+    if not separator or not re.fullmatch(r"[a-z0-9_]+", service):
+        raise argparse.ArgumentTypeError("BBC service must be TVG_ID=service_name with a lowercase alphanumeric/underscore service")
+    return tvg_base_id(identity), service
+
+
+def bbc_api_template(value):
+    if value.count("{service}") != 1 or any(char in value.replace("{service}", "") for char in "{}"):
+        raise argparse.ArgumentTypeError("BBC API template must contain exactly one {service} placeholder and no other braces")
+    try:
+        http_url(value.replace("{service}", "bbc_one_london"))
+        parts = urlsplit(value)
+    except (ProbeError, ValueError):
+        raise argparse.ArgumentTypeError("BBC API template must be an HTTP(S) URL without embedded credentials") from None
+    if "{service}" in parts.netloc or parts.fragment or any(ord(char) <= 32 or ord(char) == 127 for char in value):
+        raise argparse.ArgumentTypeError("BBC service placeholder must be in the path/query, without fragments or whitespace")
+    return value
+
+
+def bbc_supplement(services, template, proxy, timeout, first_index, excluded_ids):
+    channels = []
+    for identity, service in dict.fromkeys(services):
+        endpoint = template.replace("{service}", service)
+        name = BBC_CHANNELS.get(identity.casefold(), ("", identity))[1]
+        metadata = f'#EXTINF:-1 tvg-id="{identity}",{name}'
+        if identity.casefold() in excluded_ids:
+            # Keep the configured exclusion visible even when it is absent
+            # from the source; neither metadata nor media is requested.
+            urls = [endpoint]
+            priorities = {endpoint: 1}
+        else:
+            fetched = Client(proxy, timeout, routing=False).fetch(endpoint)
+            try:
+                payload = json.loads(text_manifest(fetched))
+            except ValueError:
+                fail("BBC mediaselector returned invalid JSON; previous generation preserved", "bbc-api-error")
+            if not isinstance(payload, dict) or not isinstance(payload.get("media"), list):
+                fail("BBC mediaselector returned no media list; previous generation preserved", "bbc-api-error")
+            urls = []
+            priorities = {}
+            for media in payload["media"]:
+                if not isinstance(media, dict) or media.get("kind") != "video" or media.get("encoding") != "h264":
+                    continue
+                connections = media.get("connection", [])
+                if not isinstance(connections, list):
+                    continue
+                for connection in connections:
+                    if (not isinstance(connection, dict) or connection.get("protocol") != "https" or
+                            connection.get("transferFormat") != "hls"):
+                        continue
+                    url = connection.get("href")
+                    if not isinstance(url, str):
+                        continue
+                    http_url(url)
+                    if urlsplit(url).scheme != "https" or "|" in url or any(ord(char) <= 32 for char in url):
+                        fail("BBC mediaselector returned an invalid HTTPS HLS URL", "bbc-api-error")
+                    raw_priority = str(connection.get("priority", ""))
+                    priority = (int(raw_priority) + 1 if re.fullmatch(r"\d{1,6}", raw_priority) else
+                                11 if BBC_CDN.fullmatch(urlsplit(url).hostname or "") else 1001)
+                    if url not in priorities:
+                        urls.append(url)
+                    priorities[url] = min(priority, priorities.get(url, priority))
+            if not urls:
+                fail("BBC mediaselector returned no H264 HTTPS HLS candidates; previous generation preserved", "bbc-api-error")
+        for url in urls:
+            channels.append(Channel(first_index + len(channels), metadata, name, {"tvg-id": identity}, (), url,
+                                    priorities[url]))
+    return channels
 
 
 @dataclass
@@ -992,11 +1128,13 @@ class Candidate:
         if self.proof:
             result.update(playback_url=redacted_url(self.url), protocol=self.proof.protocol,
                           height=self.proof.height, bandwidth=self.proof.bandwidth,
-                          proof=self.proof.detail, height_source="local ffprobe codec headers", hosts=sorted(self.hosts))
+                          proof=self.proof.detail, height_source="local ffprobe decoded video frames", hosts=sorted(self.hosts))
         return result
 
 
-def probe_channel(channel, proxy, timeout, ffprobe, min_height):
+def probe_channel(channel, proxy, timeout, ffprobe, min_height, excluded_ids=frozenset()):
+    if channel.attrs.get("tvg-id", "").partition("@")[0].strip().casefold() in excluded_ids:
+        return Candidate(channel, "excluded", "TVG base ID excluded by --exclude-id")
     attempts = []
     try:
         url, tail, headers = playback_request(channel)
@@ -1027,18 +1165,19 @@ def probe_channel(channel, proxy, timeout, ffprobe, min_height):
     return Candidate(channel, last["status"], last["reason"], attempts=attempts, observed_height=last.get("height", 0))
 
 
-def choose_candidates(candidates):
+def choose_candidates(candidates, required=REQUIRED):
     groups = {}
     for candidate in candidates:
         if candidate.proof:
             groups.setdefault(candidate.channel.key, []).append(candidate)
-    keys = sorted(groups, key=lambda key: (key not in REQUIRED, min(c.channel.index for c in groups[key])))
+    keys = sorted(groups, key=lambda key: (key not in required, min(c.channel.index for c in groups[key])))
     selected = []
     used_urls = set()
     for key in keys:
         variants = sorted(groups[key], key=lambda candidate: (
+            candidate.channel.source_priority == 0,
             candidate.proof.protocol != "hls", -candidate.proof.height, -candidate.proof.bandwidth,
-            candidate.url, candidate.channel.index))
+            candidate.channel.source_priority, candidate.url, candidate.channel.index))
         chosen = None
         for candidate in variants:
             if chosen is None and candidate.url not in used_urls:
@@ -1118,22 +1257,30 @@ def run(args):
             fail("Another UK catalogue sync is already running", "locked")
         source = Client(args.proxy, args.timeout, routing=False).fetch(args.source, SOURCE_LIMIT)
         header, channels = parse_playlist(text_manifest(source), source.url)
+        source_channels = len(channels)
+        excluded_ids = {identity.casefold() for identity in args.exclude_id}
+        supplement = bbc_supplement(args.bbc_service, args.bbc_api_template, args.proxy,
+                                    args.timeout, len(channels), excluded_ids)
+        channels.extend(supplement)
+        required = REQUIRED | {channel.key for channel in supplement}
         with ThreadPoolExecutor(max_workers=args.workers) as pool:
             candidates = list(pool.map(lambda channel: probe_channel(
-                channel, args.proxy, args.timeout, args.ffprobe, args.min_height), channels))
-        selected = choose_candidates(candidates)
+                channel, args.proxy, args.timeout, args.ffprobe, args.min_height, excluded_ids), channels))
+        selected = choose_candidates(candidates, required)
         domains = sorted({host for candidate in selected for host in candidate.hosts})
-        missing = sorted(REQUIRED - {candidate.channel.key for candidate in selected})
+        missing = sorted(required - {candidate.channel.key for candidate in selected})
         report = {"generator": "iptv-uk-sync", "schema_version": 1,
                   "generated_at": datetime.now(timezone.utc).isoformat(), "source": redacted_url(args.source),
-                  "source_channels": len(channels), "usable_candidates": sum(c.proof is not None for c in candidates),
+                  "source_channels": source_channels, "supplement_channels": len(channels) - source_channels,
+                  "usable_candidates": sum(c.proof is not None for c in candidates),
                   "published_channels": len(selected), "domains": domains,
-                  "requirements": {"minimum_channels": MIN_CHANNELS, "minimum_height": args.min_height, "missing": missing},
+                  "requirements": {"minimum_channels": MIN_CHANNELS, "minimum_height": args.min_height,
+                                   "required": sorted(required), "missing": missing},
                   "published": not missing and len(selected) >= MIN_CHANNELS,
                   "candidates": [candidate.report() for candidate in candidates]}
         if not report["published"]:
             print(json.dumps(report, ensure_ascii=False, separators=(",", ":")), file=sys.stderr)
-            fail("Fresh catalogue lacks BBC One/BBC Two or ten unique usable channels; previous generation preserved",
+            fail("Fresh catalogue lacks required channels or ten unique usable channels; previous generation preserved",
                  "catalogue-incomplete")
         artifacts = {"tv.m3u": header + "\n" + "".join(candidate.channel.render(candidate.url) for candidate in selected),
                      "tv-domains.txt": "\n".join(domains) + "\n",
@@ -1150,6 +1297,12 @@ def main(argv=None):
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=8)
     parser.add_argument("--min-height", type=int, default=720, help="Minimum confirmed video height (default: 720)")
+    parser.add_argument("--bbc-service", action="append", type=bbc_service, default=[], metavar="TVG_ID=SERVICE",
+                        help="Require this TVG ID and supplement candidates from the official BBC mediaselector (repeatable)")
+    parser.add_argument("--bbc-api-template", type=bbc_api_template, default=BBC_API_TEMPLATE,
+                        help="BBC metadata endpoint template containing {service}")
+    parser.add_argument("--exclude-id", action="append", type=tvg_base_id, default=[], metavar="ID",
+                        help="Exclude a case-insensitive TVG base ID before any media probe (repeatable)")
     parser.add_argument("--ffprobe", default=shutil.which("ffprobe"), help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if not 1 <= args.workers <= 32 or not 0 < args.timeout <= 120:

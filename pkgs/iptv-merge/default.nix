@@ -176,21 +176,28 @@ in
         next
       }
       /^#EXTINF/ {
-        # EXTINF 必须与下一行 URL 成对：还挂着上一条未配对 = 上一对缺 URL
+        # 上一条记录尚未取得 URL 时，不得用新 EXTINF 覆盖它。
         if (pend) { print "filter: EXTINF line " pe " has no URL" > "/dev/stderr"; err = 1; exit 1 }
         pend = 1
         pe = NR
         ext = $0
+        options = ""
         next
+      }
+      /^#/ {
+        # 补充源记录可含播放器选项/注释；它们只属于当前 EXTINF，不能作为 URL。
+        # 基础源保持原有严格双行契约，避免改变其过滤/合并/FCC 路径。
+        if (additive && pend && $0 !~ /^#EXTM3U/) { options = options $0 "\n"; next }
+        print "filter: unexpected directive at line " NR > "/dev/stderr"; err = 1; exit 1
       }
       {
         # 走到这必是「正挂着的 URL 行」；否则行型未知（只删不改：未知行型宁可报错也不静默透传）
         if (!pend) { print "filter: unexpected line " NR " (URL/comment without EXTINF)" > "/dev/stderr"; err = 1; exit 1 }
-        # URL 落位行必须非空且不以 # 开头【审查 M3】：空行/EXTVLCOPT 型注释伪装 URL 曾静默成对
-        #   （EXTINF/空行/EXTINF2/URL2 与 尾部 EXTINF/空行 两条坏路径都直通 sed/chmod/mv → 拒跑保旧）
-        if ($0 == "" || $0 ~ /^#/) { print "filter: line " NR " after EXTINF is not a URL" > "/dev/stderr"; err = 1; exit 1 }
+        # 空行仍不能充当 URL；指令由上面的记录分支收集。
+        if ($0 == "") { print "filter: line " NR " after EXTINF is not a URL" > "/dev/stderr"; err = 1; exit 1 }
         n++
         line_ext[n] = ext
+        line_options[n] = options
         line_url[n] = $0
         # 显示名 = 最后一个逗号之后（^.*, 左最右长，贪婪吃到最右逗号；属性区含逗号也不怕）
         disp[n] = ext
@@ -290,7 +297,7 @@ in
         # 全灭护栏：0 存活 = 过滤逻辑或上游形态已崩，宁可失败保旧也不产出空列表
         if (alive == 0) { print "filter: 0 survivors, refuse to rewrite" > "/dev/stderr"; exit 1 }
         print hdr
-        for (i = 1; i <= n; i++) if (keep[i]) { print line_ext[i]; print line_url[i] }
+        for (i = 1; i <= n; i++) if (keep[i]) { print line_ext[i]; printf "%s", line_options[i]; print line_url[i] }
 
         # ---- 统计段：固定单行落 stats 文件（shell 按前缀解析），错误路径到不了这里 ----
         printf "blacklist=%d sibling=%d block=%d dp3=%d group=%d\n", c_black, c_sib, c_block, c_dp3, c_group > stats
@@ -351,6 +358,16 @@ in
     # 五计数不在此读——补充路径跑在子壳里（子壳变量出不了壳），由父壳回读 STAT_M 文件
   }
 
+  # 补充源：只去掉空行与记录外的全局注释；EXTINF 至 URL 之间的指令原样保留。
+  # 不按白名单猜播放器选项，后续 filter_stage 负责缺 URL/嵌套头等结构错误。
+  sanitize_additive() {
+    awk 'NR == 1 { print; next }
+         /^[[:space:]]*$/ { next }
+         /^#EXTINF/ { pending = 1; print; next }
+         /^#/ { if (pending || /^#EXTM3U/) print; next }
+         { print; pending = 0 }' "$1" > "$2"
+  }
+
   # ---- 体育补充源：仅名字/分组过滤，不套用基础源的同名、清晰度或跨源去重 ----
   sports_stage() {
     TMPSP=$(mktemp "''${DST%/*}/.iptv-sports.XXXXXX")
@@ -358,11 +375,7 @@ in
     FILTSP=$(mktemp "''${DST%/*}/.iptv-sportsfilt.XXXXXX")
     STAT_SP=$(mktemp "''${DST%/*}/.iptv-sportsstats.XXXXXX")
     curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 10 "$SRC_SP" -o "$TMPSP"
-    # 与移动源相同：只丢空行和非 EXTINF 注释，EXTINF 与 URL 原样交给结构校验。
-    awk 'NR == 1 { print; next }
-         /^[[:space:]]*$/ { next }
-         /^#/ { if ($0 !~ /^#EXTINF/) next; print; next }
-         { print }' "$TMPSP" > "$SANSP"
+    sanitize_additive "$TMPSP" "$SANSP"
     head -n1 "$SANSP" | grep -q '^#EXTM3U' || { echo 'sports: bad header' >&2; exit 1; }
     [ "$(grep -c '^#EXTINF' "$SANSP")" -ge "$SP_MIN" ] || { echo 'sports: too few channels' >&2; exit 1; }
     grep -qE "$SP_REQ" "$SANSP" || { echo 'sports: missing required pattern' >&2; exit 1; }
@@ -381,11 +394,7 @@ in
     FILTBB=$(mktemp "''${DST%/*}/.iptv-bbcfilt.XXXXXX")
     STAT_BB=$(mktemp "''${DST%/*}/.iptv-bbcstats.XXXXXX")
     curl -fsSL --connect-timeout 10 --max-time 120 --retry 3 --retry-delay 10 "$SRC_BB" -o "$TMPBB"
-    # 与移动源相同：只丢空行和非 EXTINF 注释，EXTINF 与 URL 原样交给结构校验。
-    awk 'NR == 1 { print; next }
-         /^[[:space:]]*$/ { next }
-         /^#/ { if ($0 !~ /^#EXTINF/) next; print; next }
-         { print }' "$TMPBB" > "$SANBB"
+    sanitize_additive "$TMPBB" "$SANBB"
     head -n1 "$SANBB" | grep -q '^#EXTM3U' || { echo 'bbc: bad header' >&2; exit 1; }
     [ "$(grep -c '^#EXTINF' "$SANBB")" -ge "$BB_MIN" ] || { echo 'bbc: too few channels' >&2; exit 1; }
     grep -qE "$BB_REQ" "$SANBB" || { echo 'bbc: missing required pattern' >&2; exit 1; }

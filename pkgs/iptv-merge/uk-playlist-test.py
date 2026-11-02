@@ -1,33 +1,58 @@
 #!/usr/bin/env python3
 """Consumer-level, offline HTTP regressions for iptv-uk-sync.
 
-Run with --binary /nix/store/.../bin/iptv-uk-sync --ffmpeg /nix/store/.../bin/ffmpeg,
-or omit --binary to exercise the adjacent Python entry point. Fixture media is
-created locally, never downloaded. The HTTP proxy fixture resolves every .test
+Run with --binary /nix/store/.../bin/iptv-uk-sync --ffmpeg /nix/store/.../bin/ffmpeg
+and optional --ffprobe, or omit --binary to exercise the adjacent Python entry point.
+Fixture media is created locally, never downloaded. The HTTP proxy resolves every .test
 and BBC fixture URL itself, so the tests require no public DNS/network access.
 """
 
 import argparse
 from dataclasses import dataclass, field
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import ssl
 import struct
 import subprocess
 import sys
 import tempfile
 import threading
 import unittest
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urljoin, urlsplit
 
 
 ARGS = None
 BBC_HOST = "vs-cmaf-pushb-uk-live.akamaized.net"
 SOURCE = "http://source.fixture.test/uk.m3u"
 HEADER = '#EXTM3U x-tvg-url="https://epg.fixture.test/guide.xml?keep=original"'
+BBC_API_TEMPLATE = ("https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/"
+                    "mediaset/pc/vpid/{service}/format/json")
+# Public, test-only key and self-signed CA: TLS stays inside the offline fixture.
+TLS_KEY = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgk2YBqPBCwAhvI3pb
+fn9KH8j/M76n+27twWHdQXw3vqShRANCAASyeygHdskTBrrkL/6YdAlhqAAr4lmK
+wZNmG0Y/1bVLNTmwRQdmOoAYObSsyVQYkih2kZsTs1mFL3NSblKivWsA
+-----END PRIVATE KEY-----
+"""
+TLS_CERT = """-----BEGIN CERTIFICATE-----
+MIIB8jCCAZigAwIBAgIUOKl0zpK3r2KqzFneXBY5aZItnwwwCgYIKoZIzj0EAwIw
+IjEgMB4GA1UEAwwXSVBUViBvZmZsaW5lIGZpeHR1cmUgQ0EwIBcNMjYxMTAyMDE0
+MDE5WhgPMjEyNjEwMDkwMTQwMTlaMCIxIDAeBgNVBAMMF0lQVFYgb2ZmbGluZSBm
+aXh0dXJlIENBMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEsnsoB3bJEwa65C/+
+mHQJYagAK+JZisGTZhtGP9W1SzU5sEUHZjqAGDm0rMlUGJIodpGbE7NZhS9zUm5S
+or1rAKOBqTCBpjAdBgNVHQ4EFgQUyI6hOWluHf57dSUa6JM52YvnXsowHwYDVR0j
+BBgwFoAUyI6hOWluHf57dSUa6JM52YvnXsowDwYDVR0TAQH/BAUwAwEB/zAOBgNV
+HQ8BAf8EBAMCAYYwEwYDVR0lBAwwCgYIKwYBBQUHAwEwLgYDVR0RBCcwJYIOKi5m
+aXh0dXJlLnRlc3SCE29wZW4ubGl2ZS5iYmMuY28udWswCgYIKoZIzj0EAwIDSAAw
+RQIgJVXRJxvhEDf77Iyg2mV2BAC0KDmXMqpRKT8Mbp7h5BgCIQCEr9U6kXMC6TiR
+/DraLHUnHS40TLffb6LnLVmzgq8v/A==
+-----END CERTIFICATE-----
+"""
 
 
 def mp4_box(kind, body):
@@ -46,6 +71,43 @@ def split_fragmented_mp4(data):
     raise AssertionError("ffmpeg did not produce fragmented MP4 fixture media")
 
 
+def corrupt_avc_vcl(packet):
+    """Invalidate AVC slices without touching length fields, SPS/PPS or SEI."""
+    damaged = bytearray(packet)
+    offset = changed = 0
+    while offset < len(packet):
+        if offset + 4 > len(packet):
+            raise AssertionError("AVC fixture has an incomplete NAL length")
+        length = struct.unpack_from(">I", packet, offset)[0]
+        start = offset + 4
+        end = start + length
+        if not length or end > len(packet):
+            raise AssertionError("AVC fixture does not use complete four-byte NAL lengths")
+        if 1 <= packet[start] & 0x1F <= 5:
+            # forbidden_zero_bit=1 and nal_unit_type=0 cannot be decoded as
+            # a slice. avcC and any parameter NALs still describe real 720p.
+            damaged[start:end] = b"\x80" + b"\0" * (length - 1)
+            changed += 1
+        offset = end
+    if not changed:
+        raise AssertionError("AVC fixture packet had no genuine VCL NAL to corrupt")
+    return bytes(damaged)
+
+
+def corrupt_mdat(data, avc=False):
+    damaged = bytearray(data)
+    offset = 0
+    while offset + 8 <= len(data):
+        size, kind = struct.unpack_from(">I4s", data, offset)
+        if size < 8 or offset + size > len(data):
+            break
+        if kind == b"mdat":
+            body = damaged[offset + 8:offset + size]
+            damaged[offset + 8:offset + size] = corrupt_avc_vcl(body) if avc else b"\0" * len(body)
+        offset += size
+    return bytes(damaged)
+
+
 @dataclass
 class Response:
     body: bytes = b""
@@ -57,7 +119,7 @@ class Response:
 
 
 class Fixture:
-    def __init__(self):
+    def __init__(self, tls_context):
         self.routes = {}
         self.seen = []
         self.lock = threading.Lock()
@@ -68,6 +130,24 @@ class Fixture:
 
             def log_message(self, *_):
                 pass
+
+            def do_CONNECT(self):
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.flush()
+                plain_connection, plain_rfile, plain_wfile = self.connection, self.rfile, self.wfile
+                try:
+                    with tls_context.wrap_socket(plain_connection, server_side=True) as connection:
+                        self.connection = connection
+                        with connection.makefile("rb") as rfile, connection.makefile("wb") as wfile:
+                            self.rfile, self.wfile = rfile, wfile
+                            self.close_connection = False
+                            self.handle_one_request()
+                except (ssl.SSLError, OSError):
+                    pass
+                finally:
+                    self.connection, self.rfile, self.wfile = plain_connection, plain_rfile, plain_wfile
+                    self.close_connection = True
 
             def do_GET(self):
                 parts = urlsplit(self.path)
@@ -131,6 +211,12 @@ class CatalogueTests(unittest.TestCase):
     def setUpClass(cls):
         cls.media_dir = tempfile.TemporaryDirectory(prefix="iptv-uk-test-media-")
         directory = Path(cls.media_dir.name)
+        cls.ca_file = directory / "fixture-ca.pem"
+        cls.ca_file.write_text(TLS_CERT)
+        key_file = directory / "fixture-key.pem"
+        key_file.write_text(TLS_KEY)
+        cls.tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        cls.tls_context.load_cert_chain(cls.ca_file, key_file)
         ffmpeg = ARGS.ffmpeg
         def generate(arguments):
             result = subprocess.run([ffmpeg, "-v", "error", "-nostdin", *arguments],
@@ -140,15 +226,23 @@ class CatalogueTests(unittest.TestCase):
         generate(["-f", "lavfi", "-i", "color=c=black:s=1280x720:r=10", "-t", "1",
                   "-c:v", "mpeg2video", "-g", "1", "-threads", "1", "-f", "mpegts", str(directory / "sample.ts")])
         generate(["-f", "lavfi", "-i", "color=c=black:s=1280x720:r=10", "-t", "1",
-                  "-c:v", "mpeg4", "-g", "1", "-threads", "1", "-movflags",
+                  "-c:v", "libx264", "-preset", "ultrafast", "-g", "1", "-threads", "1", "-movflags",
                   "+frag_keyframe+empty_moov+default_base_moof", "-f", "mp4", str(directory / "sample.mp4")])
         cls.ts = (directory / "sample.ts").read_bytes()
         cls.init, cls.fragment = split_fragmented_mp4((directory / "sample.mp4").read_bytes())
+        cls.damaged_fragment = corrupt_mdat(cls.fragment, avc=True)
+        generate(["-f", "lavfi", "-i",
+                  "testsrc2=size=1280x720:rate=2,noise=alls=80:allf=t+u:all_seed=819",
+                  "-frames:v", "1", "-c:v", "mpeg4", "-q:v", "4", "-threads", "1",
+                  "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                  "-f", "mp4", str(directory / "large-idr.mp4")])
+        cls.large_init, cls.large_fragment = split_fragmented_mp4((directory / "large-idr.mp4").read_bytes())
         cls.key = b"0123456789abcdef"
         (directory / "key.bin").write_bytes(cls.key)
         cls.iv = "0" * 31 + "5"
         (directory / "key.info").write_text("key.bin\n" + str(directory / "key.bin") + "\n" + cls.iv + "\n")
-        generate(["-i", str(directory / "sample.ts"), "-c", "copy", "-hls_time", "10",
+        generate(["-stream_loop", "-1", "-i", str(directory / "sample.ts"), "-t", "60",
+                  "-c", "copy", "-hls_time", "120",
                   "-hls_key_info_file", str(directory / "key.info"), "-hls_segment_filename",
                   str(directory / "cipher-%d.ts"), "-f", "hls", str(directory / "cipher.m3u8")])
         cls.cipher = (directory / "cipher-0.ts").read_bytes()
@@ -164,6 +258,10 @@ class CatalogueTests(unittest.TestCase):
         generate(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1", "-c:a", "aac",
                   "-f", "mpegts", str(directory / "audio.ts")])
         cls.audio = (directory / "audio.ts").read_bytes()
+        generate(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1", "-c:a", "aac",
+                  "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                  "-f", "mp4", str(directory / "audio.mp4")])
+        cls.audio_init, cls.audio_fragment = split_fragmented_mp4((directory / "audio.mp4").read_bytes())
 
     @classmethod
     def tearDownClass(cls):
@@ -173,7 +271,7 @@ class CatalogueTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="iptv-uk-test-")
         self.root = Path(self.temp.name)
         self.output = self.root / "uk-tv"
-        self.http = Fixture()
+        self.http = Fixture(self.tls_context)
         self.http.add("http://segments.fixture.test/actual.ts", self.ts)
         self.http.add("http://init.fixture.test/init.mp4", self.init)
         self.http.add("http://segments.fixture.test/actual.m4s", self.fragment)
@@ -211,7 +309,8 @@ class CatalogueTests(unittest.TestCase):
         self.http.add(SOURCE, text)
         return text
 
-    def run_sync(self, success=True, entries=None, source_status=None, truncated_source=False, no_proxy=False, source_url=SOURCE):
+    def run_sync(self, success=True, entries=None, source_status=None, truncated_source=False, no_proxy=False,
+                 source_url=SOURCE, extra_args=()):
         text = self.source(entries)
         if source_url != SOURCE:
             self.http.add(source_url, text)
@@ -222,9 +321,9 @@ class CatalogueTests(unittest.TestCase):
         command = ([ARGS.binary] if ARGS.binary else [sys.executable, str(Path(__file__).with_name("uk-playlist.py"))])
         command += ["--source", source_url, "--output-dir", str(self.output), "--proxy", self.http.proxy,
                     "--workers", "4", "--timeout", "2", "--min-height", "720"]
-        if not ARGS.binary:
-            command += ["--ffprobe", str(Path(ARGS.ffmpeg).with_name("ffprobe"))]
+        command += ["--ffprobe", ARGS.ffprobe, *extra_args]
         environment = dict(os.environ)
+        environment["SSL_CERT_FILE"] = str(self.ca_file)
         for name in ("no_proxy", "NO_PROXY"):
             environment.pop(name, None)
         if no_proxy:
@@ -242,6 +341,74 @@ class CatalogueTests(unittest.TestCase):
 
     def by_id(self, report, identity):
         return next(candidate for candidate in report["candidates"] if candidate["id"] == identity)
+
+    def assert_packet_only_height_proof(self, sample):
+        # Match the old publication predicate, including its original bounds.
+        command = [ARGS.ffprobe, "-v", "error", "-protocol_whitelist", "file,data",
+                   "-probesize", str(64 * 1024), "-analyzeduration", "1000000",
+                   "-read_intervals", "%+0.25", "-show_entries",
+                   "stream=codec_name,codec_type,width,height:packet=size", "-of", "json", str(sample)]
+        result = subprocess.run(command, capture_output=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        proof = json.loads(result.stdout)
+        self.assertTrue(any(stream.get("codec_type") == "video" and stream.get("codec_name") == "h264" and
+                            stream.get("height") == 720 for stream in proof.get("streams", [])))
+        self.assertTrue(any(int(packet.get("size", 0)) > 0 for packet in proof.get("packets", [])))
+
+    def published_entry(self, identity):
+        attrs = None
+        for line in self.playlist().splitlines():
+            if line.startswith("#EXTINF:"):
+                attrs = {match.group(1).lower(): next(value for value in match.groups()[1:] if value is not None)
+                         for match in re.finditer(r'''([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')''', line)}
+            elif line and not line.startswith("#") and attrs is not None:
+                if attrs.get("tvg-id") == identity:
+                    return attrs, line
+                attrs = None
+        self.fail("Published channel not found: " + identity)
+
+    def aptv_media(self, identity):
+        """Reference consumer: use APTV's inline controls, not VLC/EXTHTTP options."""
+        attrs, url = self.published_entry(identity)
+        url = url.partition("|")[0]
+        headers = {}
+        if "http-header" in attrs:
+            name, value = attrs["http-header"].split("=", 1)
+            headers[name] = value
+        if "http-referer" in attrs:
+            headers["Referer"] = attrs["http-referer"]
+        if "http-user-agent" in attrs:
+            headers["User-Agent"] = attrs["http-user-agent"]
+
+        def fetch(target):
+            connection = HTTPConnection("127.0.0.1", self.http.server.server_port, timeout=2)
+            try:
+                connection.request("GET", target, headers=headers)
+                response = connection.getresponse()
+                self.assertEqual(response.status, 200, target)
+                return response.read()
+            finally:
+                connection.close()
+
+        manifest = fetch(url).decode()
+        segment = next(line for line in manifest.splitlines() if line and not line.startswith("#"))
+        return fetch(urljoin(url, segment))
+
+    def bbc_api(self, service, urls, template=BBC_API_TEMPLATE, priorities=None):
+        priorities = priorities or ["10"] * len(urls)
+        connections = [{"protocol": "https", "transferFormat": "hls", "href": url, "priority": priority}
+                       for url, priority in zip(urls, priorities)]
+        payload = {"media": [
+            {"kind": "captions", "encoding": "", "connection": [
+                {"protocol": "https", "transferFormat": "hls", "href": "https://ignored.fixture.test/captions.m3u8"}]},
+            {"kind": "video", "encoding": "vp9", "connection": [
+                {"protocol": "https", "transferFormat": "hls", "href": "https://ignored.fixture.test/vp9.m3u8"}]},
+            *({"kind": "video", "encoding": "h264", "bitrate": bitrate,
+               "connection": [*connections,
+                              {"protocol": "http", "transferFormat": "hls", "href": "http://ignored.fixture.test/live.m3u8"},
+                              {"protocol": "https", "transferFormat": "dash", "href": "https://ignored.fixture.test/live.mpd"}]}
+              for bitrate in ("3000", "10000"))]}
+        return self.http.add(template.replace("{service}", service), json.dumps(payload))
 
     def dash(self, name, protection="", init=None, media=None, template=None):
         init = init or "http://init.fixture.test/init.mp4"
@@ -285,19 +452,370 @@ class CatalogueTests(unittest.TestCase):
         require = {"User-Agent": "Agent/1 (x, y)", "Referer": "https://referer.fixture.test/page?keep=yes",
                    "Origin": "https://origin.fixture.test", "X-Fixture": "pipe-header"}
         options = ('#EXTVLCOPT:http-referrer=https://referer.fixture.test/page?keep=yes',
-                   '#EXTVLCOPT:http-user-agent=overridden agent',
+                   '#EXTVLCOPT:http-user-agent=Agent/1 (x, y)',
                    '#EXTHTTP:{"Origin":"https://origin.fixture.test"}')
         self.http.add(url, "#EXTM3U\n#EXTINF:1,\nhttp://headers.fixture.test/segment.ts?keep=a%26b\n", require=require)
         self.http.add("http://headers.fixture.test/segment.ts?keep=a%26b", self.ts, require=require)
-        metadata = ' tvg-logo="https://logos.fixture.test/one,two.png?keep=a%26b" group-title="News" user-agent="Agent (x, y)"'
+        metadata = ' tvg-logo="https://logos.fixture.test/one,two.png?keep=a%26b" group-title="News" user-agent="Agent/1 (x, y)"'
         self.entries[5] = ('#EXTINF:-1 tvg-id="Fixture0.uk@HD"' + metadata + ',Fixture, With Comma', options, url + tail)
         report = self.run_sync()
-        expected = "\n".join((self.entries[5][0], *options, url + tail))
-        self.assertIn(expected, self.playlist())
+        self.assertIn("\n".join((*options, url + tail)), self.playlist())
+        attrs, published_url = self.published_entry("Fixture0.uk@HD")
+        self.assertEqual(published_url, url + tail)
+        self.assertEqual(attrs["tvg-logo"], "https://logos.fixture.test/one,two.png?keep=a%26b")
+        self.assertEqual(attrs["group-title"], "News")
+        self.assertEqual(attrs["user-agent"], "Agent/1 (x, y)")
+        self.assertEqual(attrs["http-referer"], require["Referer"])
+        self.assertEqual(attrs["http-user-agent"], require["User-Agent"])
         self.assertNotIn("history-secret-fixture", json.dumps(report))
         self.assertNotIn("pipe-header", json.dumps(report))
         self.assertEqual(self.by_id(report, "Fixture0.uk@HD")["name"], "Fixture, With Comma")
         self.assertTrue(any(path == "/segment.ts?keep=a%26b" for _, path, _ in self.http.seen))
+
+    def test_aptv_inline_controls_fetch_real_header_protected_media(self):
+        referer = "https://stmify.fixture.test/watch?keep=a%26b"
+        agent = "Fixture Chrome/155 (TV, APTV)"
+        require = {"Referer": referer, "User-Agent": agent}
+        cases = {
+            "LegacyInline": (f' http-referrer="{referer}" http-user-agent="{agent}"', ()),
+            "CanonicalInline": (f' http-referer="{referer}" http-user-agent="{agent}"', ()),
+            "HeaderInline": (f' http-header="Referer={referer}" http-user-agent="{agent}"', ()),
+            "VLC": ("", (f"#EXTVLCOPT:http-referrer={referer}", f"#EXTVLCOPT:http-user-agent={agent}")),
+            "EXTHTTP": ("", ("#EXTHTTP:" + json.dumps(require),)),
+            "Repeated": (f' http-referrer="{referer}" http-header="Referer={referer}" http-user-agent="{agent}"',
+                         (f"#EXTVLCOPT:http-referrer={referer}",
+                          f"#EXTVLCOPT:http-user-agent={agent}",
+                          "#EXTHTTP:" + json.dumps({"rEfErReR": referer, "USER-AGENT": agent}),
+                          "#KODIPROP:inputstream.adaptive.stream_headers=" +
+                          urlencode({"Referer": referer, "User-Agent": agent}),
+                          "#KODIPROP:inputstream.adaptive.manifest_headers=" +
+                          urlencode({"referrer": referer, "user-agent": agent}))),
+        }
+        for name, (metadata, options) in cases.items():
+            segment = f"http://protected.fixture.test/{name}.ts"
+            url = f"http://protected.fixture.test/{name}.m3u8"
+            self.http.add(segment, self.ts, require=require)
+            self.http.add(url, "#EXTM3U\n#EXTINF:1,\n" + segment + "\n", require=require)
+            tail = "|" + urlencode({"rEfErEr": referer, "user-agent": agent}) if name == "Repeated" else ""
+            self.append(name + ".uk", name, url + tail, options, metadata)
+        conflict = "http://protected.fixture.test/conflict.m3u8"
+        self.append("ConflictingControls.uk", "Contradictory controls", conflict,
+                    ("#EXTHTTP:" + json.dumps(require),), ' http-referer="https://wrong.fixture.test/"')
+        report = self.run_sync()
+        for name in cases:
+            with self.subTest(source=name):
+                self.assertEqual(self.by_id(report, name + ".uk")["status"], "usable")
+                attrs, _ = self.published_entry(name + ".uk")
+                self.assertEqual(attrs["http-referer"], referer)
+                self.assertEqual(attrs["http-user-agent"], agent)
+                info = next(line for line in self.playlist().splitlines()
+                            if line.startswith("#EXTINF:") and f'tvg-id="{name}.uk"' in line)
+                self.assertEqual(len(re.findall(r"(?<![\w-])http-referer\s*=", info)), 1)
+                self.assertEqual(len(re.findall(r"(?<![\w-])http-user-agent\s*=", info)), 1)
+                self.assertEqual(self.aptv_media(name + ".uk"), self.ts)
+        self.assertEqual(self.by_id(report, "ConflictingControls.uk")["status"], "unsupported")
+        self.assertFalse(any(path == "/conflict.m3u8" for _, path, _ in self.http.seen))
+        ordinary, _ = self.published_entry("Fixture0.uk@HD")
+        self.assertNotIn("http-user-agent", ordinary)
+        self.assertNotIn("http-referer", ordinary)
+
+    def test_conflicting_preserved_controls_are_rejected_before_protected_media_requests(self):
+        referer = "https://stmify.fixture.test/watch"
+        wrong = "https://wrong.fixture.test/"
+        agent = "Fixture Chrome/155"
+        require = {"Referer": referer, "User-Agent": agent, "X-Fixture": "B"}
+        cases = {
+            "VLCTail": ("", (f"#EXTVLCOPT:http-referrer={wrong}",)),
+            "EXTHTTPTail": ("", ("#EXTHTTP:" + json.dumps({"referer": wrong}),)),
+            "KodiTail": ("", ("#KODIPROP:inputstream.adaptive.stream_headers=" + urlencode({"Referrer": wrong}),)),
+            "KodiBoth": ("", (
+                "#KODIPROP:inputstream.adaptive.STREAM_HEADERS=" + urlencode({"Referrer": wrong}),
+                "#KODIPROP:inputstream.adaptive.manifest_headers=" + urlencode({"Referer": referer}))),
+            "LegacyInline": (f' http-referrer="{wrong}"', ()),
+            "DuplicateInline": (f' http-referer="{wrong}" http-referer="{referer}"', ()),
+            "DuplicateJSON": ("", (f'#EXTHTTP:{{"Referer":"{wrong}","Referer":"{referer}"}}',)),
+            "HeaderAliases": ("", (f"#EXTVLCOPT:http-header=rEfErReR:{wrong}",
+                                   "#EXTHTTP:" + json.dumps({"rEfErEr": referer}))),
+            "UserAgentTail": ("", ("#EXTVLCOPT:http-user-agent=wrong agent",)),
+            "HeaderNameCase": ("", ("#EXTVLCOPT:http-header=X-Fixture:A",)),
+        }
+        for name, (metadata, options) in cases.items():
+            segment = f"http://protected-conflict.fixture.test/{name}.ts"
+            url = f"http://protected-conflict.fixture.test/{name}.m3u8"
+            self.http.add(segment, self.ts, require=require)
+            self.http.add(url, "#EXTM3U\n#EXTINF:1,\n" + segment + "\n", require=require)
+            self.append(name + ".uk", name, url + "|" + urlencode(require), options, metadata)
+        report = self.run_sync()
+        for name in cases:
+            with self.subTest(source=name):
+                self.assertEqual(self.by_id(report, name + ".uk")["status"], "unsupported")
+                self.assertNotIn(f'tvg-id="{name}.uk"', self.playlist())
+        self.assertFalse(any(host == "protected-conflict.fixture.test" for host, _, _ in self.http.seen))
+
+    def test_bbc_api_recovers_broken_or_missing_one_and_english_news(self):
+        low = self.fmp4_hls("bbc-api-sd", 360)
+        high = self.fmp4_hls("bbc-api-hd", 720)
+        masters = {}
+        for service in ("bbc_one_london", "bbc_news_channel_hd"):
+            masters[service] = self.http.add(
+                f"https://bbc-live.fixture.test/{service}/master.m3u8",
+                '#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=640x360,BANDWIDTH=500000\n' + low +
+                '\n#EXT-X-STREAM-INF:RESOLUTION=1280x720,BANDWIDTH=3000000\n' + high + "\n")
+            self.bbc_api(service, [masters[service], masters[service]])
+        damaged = self.http.add("http://broken.fixture.test/bbc-one.m4s", self.damaged_fragment)
+        broken_one = self.hls("bbc-one-zero-frames", damaged, '#EXT-X-MAP:URI="http://init.fixture.test/init.mp4"\n')
+        pashto = self.hls("pashto-valid", host="pashto.fixture.test")
+        flags = ["--bbc-service", "BBCOne.uk=bbc_one_london",
+                 "--bbc-service", "BBCNews.uk=bbc_news_channel_hd",
+                 "--exclude-id", "bbcnewspashto.uk"]
+        for mode in ("broken", "missing"):
+            with self.subTest(source=mode):
+                entries = self.entries[1:]
+                if mode == "broken":
+                    entries = [('#EXTINF:-1 tvg-id="BBCOne.uk@East",BBC One East', (), broken_one), *entries,
+                               ('#EXTINF:-1 tvg-id="BBCNews.uk@UKHD",BBC News upstream', (), "http://192.0.2.10/news")]
+                entries = [*entries, ('#EXTINF:-1 tvg-id="BBCNewsPashto.uk@HD",BBC News Pashto', (), pashto)]
+                self.http.seen.clear()
+                report = self.run_sync(entries=entries, extra_args=flags, no_proxy=True)
+                for identity, service, label in (("BBCOne.uk", "bbc_one_london", "BBC One"),
+                                                 ("BBCNews.uk", "bbc_news_channel_hd", "BBC News")):
+                    candidates = [candidate for candidate in report["candidates"] if candidate["id"] == identity]
+                    self.assertEqual(len(candidates), 1, "Duplicate bitrate records must yield one master probe")
+                    self.assertEqual(candidates[0]["selection"], "selected")
+                    self.assertEqual(candidates[0]["height"], 720)
+                    self.assertIn(masters[service] + "\n", self.playlist())
+                    self.assertEqual(self.playlist().count("," + label + "\n"), 1)
+                excluded = self.by_id(report, "BBCNewsPashto.uk@HD")
+                self.assertEqual(excluded["status"], "excluded")
+                self.assertEqual(excluded["attempts"], [])
+                self.assertFalse(any(host == "pashto.fixture.test" for host, _, _ in self.http.seen))
+                self.assertFalse(any(host == "ignored.fixture.test" for host, _, _ in self.http.seen))
+                domains = (self.output / "tv-domains.txt").read_text().splitlines()
+                self.assertIn("bbc-live.fixture.test", domains)
+                self.assertNotIn("open.live.bbc.co.uk", domains)
+                self.assertNotIn(",BBC News Pashto\n", self.playlist())
+                if mode == "broken":
+                    self.assertEqual(self.by_id(report, "BBCOne.uk@East")["status"], "unknown-resolution")
+                    self.assertEqual(self.by_id(report, "BBCNews.uk@UKHD")["status"], "unsupported-ip-host")
+
+    def test_bbc_service_priority_selects_healthy_official_primary_not_lexical_cdn(self):
+        upstream = self.fmp4_hls("bbc-upstream-1080", 1080)
+        self.entries[0] = ('#EXTINF:-1 tvg-id="BBCOne.uk@East",BBC One East', (), upstream)
+        default = self.run_sync()
+        self.assertEqual(self.by_id(default, "BBCOne.uk@East")["selection"], "selected")
+        child = self.fmp4_hls("official-bbc-720", 720)
+        master = '#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720,BANDWIDTH=3000000\n' + child + "\n"
+        secondary = self.http.add("https://aa-cdn.fixture.test/master.m3u8", master)
+        primary = self.http.add("https://zz-primary.fixture.test/master.m3u8", master)
+        failed = "https://failed-primary.fixture.test/master.m3u8"
+        self.bbc_api("bbc_one_london", [secondary, primary, failed], priorities=["20", "10", "1"])
+        report = self.run_sync(extra_args=["--bbc-service", "BBCOne.uk=bbc_one_london"])
+        official = [candidate for candidate in report["candidates"] if candidate["id"] == "BBCOne.uk"]
+        selected = next(candidate for candidate in official if candidate["selection"] == "selected")
+        self.assertEqual(selected["playback_url"], primary)
+        self.assertEqual(selected["height"], 720)
+        self.assertEqual(self.by_id(report, "BBCOne.uk@East")["selection"], "canonical-duplicate")
+        self.assertTrue(any(candidate["status"] == "http-error" for candidate in official))
+        self.assertIn(primary + "\n", self.playlist())
+        self.assertNotIn(secondary + "\n", self.playlist())
+        self.assertNotIn(upstream + "\n", self.playlist())
+
+    def test_bbc_endpoint_override_and_api_errors_preserve_complete_generation(self):
+        template = "http://api.fixture.test/select/{service}?format=json"
+        master = self.http.add("https://bbc-live.fixture.test/news.m3u8",
+                               "#EXTM3U\n#EXTINF:1,\nhttp://segments.fixture.test/actual.ts\n")
+        endpoint = self.bbc_api("bbc_news_channel_hd", [master], template)
+        flags = ["--bbc-service", "BBCNews.uk=bbc_news_channel_hd", "--bbc-api-template", template]
+        report = self.run_sync(extra_args=flags)
+        self.assertEqual(self.by_id(report, "BBCNews.uk")["selection"], "selected")
+        self.assertNotIn("api.fixture.test", (self.output / "tv-domains.txt").read_text().splitlines())
+        target = os.readlink(self.output)
+        before = {name: (self.output / name).read_bytes() for name in ("tv.m3u", "tv-domains.txt", "report.json")}
+        for body, status in (("not JSON", 200), ('{"media":[]}', 200), ("", 503)):
+            with self.subTest(response=(body, status)):
+                self.http.add(endpoint, body, status=status)
+                self.run_sync(success=False, extra_args=flags)
+                self.assertEqual(os.readlink(self.output), target)
+                self.assertEqual({name: (self.output / name).read_bytes() for name in before}, before)
+        self.bbc_api("bbc_news_channel_hd", [master], template)
+        damaged = self.http.add("http://broken.fixture.test/required-news.m4s", self.damaged_fragment)
+        zero_frames = ('#EXTM3U\n#EXT-X-MAP:URI="http://init.fixture.test/init.mp4"\n'
+                       '#EXTINF:1,\n' + damaged + "\n")
+        low = self.fmp4_hls("required-news-low", 360)
+        for body, status, headers in ((zero_frames, 200, {}), ("", 404, {}),
+                                      ("", 302, {"Location": low})):
+            with self.subTest(media=(status, headers)):
+                self.http.add(master, body, status=status, headers=headers)
+                result = self.run_sync(success=False, extra_args=flags)
+                failed = json.loads(next(line for line in result.stderr.splitlines() if line.startswith("{")))
+                self.assertIn("bbc-news", failed["requirements"]["missing"])
+                self.assertNotEqual(self.by_id(failed, "BBCNews.uk")["status"], "usable")
+                self.assertEqual(os.readlink(self.output), target)
+                self.assertEqual({name: (self.output / name).read_bytes() for name in before}, before)
+
+    def test_bbc_arguments_cannot_inject_query_or_playlist_metadata(self):
+        self.run_sync()
+        target = os.readlink(self.output)
+        before = {name: (self.output / name).read_bytes() for name in ("tv.m3u", "tv-domains.txt", "report.json")}
+        cases = [
+            ["--bbc-service", "BBCOne.uk=bbc_one_london?other=value"],
+            ["--bbc-service", 'BBCOne.uk" injected="x=bbc_one_london'],
+            ["--bbc-api-template", "https://api.fixture.test/{service.__class__}"],
+            ["--bbc-api-template", "https://{service}.fixture.test/select"],
+        ]
+        for flags in cases:
+            with self.subTest(arguments=flags):
+                self.http.seen.clear()
+                self.run_sync(success=False, extra_args=flags)
+                self.assertEqual(self.http.seen, [])
+                self.assertEqual(os.readlink(self.output), target)
+                self.assertEqual({name: (self.output / name).read_bytes() for name in before}, before)
+
+    def test_exclusions_precede_source_and_supplement_requests_without_bypassing_required_bbc(self):
+        for identity in ("BBCNewsPashto.uk@HD", "bbcnewspashto.UK@Main"):
+            self.append(identity, "BBC News Pashto", self.hls(identity, host="pashto.fixture.test"))
+        flags = ["--exclude-id", "BBCNEWSPASHTO.UK", "--exclude-id", "Unlisted.uk"]
+        report = self.run_sync(extra_args=flags)
+        for identity in ("BBCNewsPashto.uk@HD", "bbcnewspashto.UK@Main"):
+            candidate = self.by_id(report, identity)
+            self.assertEqual(candidate["status"], "excluded")
+            self.assertEqual(candidate["attempts"], [])
+        self.assertEqual(report["published_channels"], 10)
+        self.assertEqual(self.by_id(report, "BBCOne.uk@London")["selection"], "selected")
+        self.assertEqual(self.by_id(report, "Fixture0.uk@HD")["selection"], "selected")
+        self.assertFalse(any(host in ("pashto.fixture.test", "open.live.bbc.co.uk")
+                             for host, _, _ in self.http.seen))
+        target = os.readlink(self.output)
+        before = {name: (self.output / name).read_bytes() for name in ("tv.m3u", "tv-domains.txt", "report.json")}
+        self.http.seen.clear()
+        result = self.run_sync(success=False, extra_args=[*flags, "--bbc-service",
+                                                         "BBCNewsPashto.uk=bbc_news_channel_hd"])
+        failed = json.loads(next(line for line in result.stderr.splitlines() if line.startswith("{")))
+        self.assertEqual(self.by_id(failed, "BBCNewsPashto.uk")["status"], "excluded")
+        self.assertIn("id:bbcnewspashto.uk", failed["requirements"]["missing"])
+        self.assertFalse(any(host in ("pashto.fixture.test", "open.live.bbc.co.uk")
+                             for host, _, _ in self.http.seen))
+        self.assertEqual(os.readlink(self.output), target)
+        self.assertEqual({name: (self.output / name).read_bytes() for name in before}, before)
+        self.http.seen.clear()
+        self.run_sync(success=False, extra_args=[*flags, "--exclude-id", "bbcONE.uk",
+                                                "--bbc-service", "BBCOne.uk=bbc_one_london"])
+        self.assertEqual(os.readlink(self.output), target)
+        self.assertEqual({name: (self.output / name).read_bytes() for name in before}, before)
+        self.assertFalse(any(host == "open.live.bbc.co.uk" or path == "/bbc-one/index.m3u8"
+                             for host, path, _ in self.http.seen))
+
+    def test_intact_video_metadata_and_packets_do_not_prove_decodable_video(self):
+        sample = self.root / "zero-frame.mp4"
+        sample.write_bytes(self.init + self.damaged_fragment)
+        self.assert_packet_only_height_proof(sample)
+        result = subprocess.run([ARGS.ffprobe, "-v", "error", "-protocol_whitelist", "file,data",
+                                 "-show_frames", "-show_entries", "frame=media_type", "-of", "json", str(sample)],
+                                capture_output=True, timeout=10, check=False)
+        self.assertFalse(any(frame.get("media_type") == "video" for frame in json.loads(result.stdout).get("frames", [])))
+        media = self.http.add("http://broken.fixture.test/zero-frame.m4s", self.damaged_fragment)
+        hls = self.hls("zero-frame", media, '#EXT-X-MAP:URI="http://init.fixture.test/init.mp4"\n')
+        dash = self.dash("zero-frame", media=media)
+        self.append("ZeroFrameHLS.uk", "Unusable despite HD metadata", hls)
+        self.append("ZeroFrameDASH.uk", "Unusable despite HD metadata", dash)
+        report = self.run_sync()
+        for identity, url in (("ZeroFrameHLS.uk", hls), ("ZeroFrameDASH.uk", dash)):
+            candidate = self.by_id(report, identity)
+            self.assertEqual(candidate["status"], "unknown-resolution")
+            self.assertEqual(candidate["height"], 0)
+            self.assertNotIn(url + "\n", self.playlist())
+
+    def test_audio_frames_cannot_validate_an_undecodable_video_track(self):
+        sample = self.root / "audio-video.mp4"
+        result = subprocess.run(
+            [ARGS.ffmpeg, "-v", "error", "-nostdin", "-f", "lavfi", "-i", "color=c=black:s=1280x720:r=2",
+             "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo", "-t", "1",
+             "-c:v", "libx264", "-preset", "ultrafast", "-g", "1",
+             "-c:a", "aac", "-threads", "1", "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+             "-f", "mp4", str(sample)], capture_output=True, timeout=30, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
+        result = subprocess.run(
+            [ARGS.ffprobe, "-v", "error", "-protocol_whitelist", "file,data", "-select_streams", "v:0",
+             "-show_entries", "packet=pos,size", "-of", "json", str(sample)],
+            capture_output=True, timeout=10, check=False)
+        packets = json.loads(result.stdout).get("packets", [])
+        self.assertTrue(packets)
+        data = bytearray(sample.read_bytes())
+        for packet in packets:
+            start, size = int(packet["pos"]), int(packet["size"])
+            data[start:start + size] = corrupt_avc_vcl(data[start:start + size])
+        sample.write_bytes(data)
+        self.assert_packet_only_height_proof(sample)
+        result = subprocess.run(
+            [ARGS.ffprobe, "-v", "error", "-protocol_whitelist", "file,data", "-show_frames",
+             "-show_entries", "frame=media_type", "-of", "json", str(sample)],
+            capture_output=True, timeout=10, check=False)
+        frames = json.loads(result.stdout).get("frames", [])
+        self.assertTrue(any(frame.get("media_type") == "audio" for frame in frames))
+        self.assertFalse(any(frame.get("media_type") == "video" for frame in frames))
+        initialization, fragment = split_fragmented_mp4(data)
+        init = self.http.add("http://broken.fixture.test/av-init.mp4", initialization)
+        media = self.http.add("http://broken.fixture.test/av.m4s", fragment)
+        hls = self.hls("audio-no-video", media, f'#EXT-X-MAP:URI="{init}"\n')
+        self.append("AudioWithoutVideoHLS.uk", "A/V stream with no decoded video", hls)
+        self.append("AudioWithoutVideoDASH.uk", "A/V stream with no decoded video",
+                    self.dash("audio-no-video", init=init, media=media))
+        report = self.run_sync()
+        for identity in ("AudioWithoutVideoHLS.uk", "AudioWithoutVideoDASH.uk"):
+            self.assertEqual(self.by_id(report, identity)["status"], "unknown-resolution")
+            self.assertNotIn('tvg-id="' + identity + '"', self.playlist())
+
+    def test_large_real_idr_is_decoded_within_the_bounded_media_budget(self):
+        self.assertGreater(len(self.large_fragment), 64 * 1024)
+        self.assertLess(len(self.large_fragment), 2 * 1024 * 1024)
+        init = self.http.add("http://large.fixture.test/init.mp4", self.large_init)
+        media = self.http.add("http://large.fixture.test/frame.m4s", self.large_fragment)
+        hls = self.hls("large-idr", media, f'#EXT-X-MAP:URI="{init}"\n')
+        dash = self.dash("large-idr", init=init, media=media)
+        self.append("LargeHLS.uk", "Large genuine HD IDR", hls)
+        self.append("LargeDASH.uk", "Large genuine HD IDR", dash)
+        report = self.run_sync()
+        for identity in ("LargeHLS.uk", "LargeDASH.uk"):
+            candidate = self.by_id(report, identity)
+            self.assertEqual(candidate["status"], "usable", candidate)
+            self.assertEqual(candidate["height"], 720)
+        requests = [headers["Range"] for host, path, headers in self.http.seen
+                    if host == "large.fixture.test" and path == "/frame.m4s"]
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(int(value.split("-")[1]) < 2 * 1024 * 1024 for value in requests))
+
+    def test_audio_renditions_require_real_decoded_audio_not_just_packets_or_video(self):
+        init = self.http.add("http://bad-audio.fixture.test/init.mp4", self.audio_init)
+        media = self.http.add("http://bad-audio.fixture.test/segment.m4s", corrupt_mdat(self.audio_fragment))
+        bad_audio = self.hls("zero-frame-audio", media, f'#EXT-X-MAP:URI="{init}"\n')
+        video_only_audio = self.hls("video-not-audio")
+        for name, audio in (("ZeroAudio", bad_audio), ("VideoNotAudio", video_only_audio)):
+            master = self.http.add(
+                f"http://manifest.fixture.test/{name}/master.m3u8",
+                '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",DEFAULT=YES,URI="' + audio + '"\n'
+                '#EXT-X-STREAM-INF:RESOLUTION=1280x720,BANDWIDTH=3000000,AUDIO="a"\n' + self.entries[5][2] + "\n")
+            self.append(name + ".uk", "Audio frame proof", master)
+        audio_segment = self.http.add("http://audio.fixture.test/only-audio.ts", self.audio)
+        audio_variant = self.hls("audio-as-video", audio_segment)
+        master = self.http.add(
+            "http://manifest.fixture.test/audio-as-video/master.m3u8",
+            '#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720,BANDWIDTH=3000000\n' + self.entries[5][2] +
+            '\n#EXT-X-STREAM-INF:RESOLUTION=1280x720,BANDWIDTH=1000000\n' + audio_variant + "\n")
+        self.append("AudioAsVideoVariant.uk", "Audio cannot prove advertised video", master)
+        for name, codecs in (("AudioAsVideoCodecs", "avc1.4d401f,mp4a.40.2"),
+                             ("GenuineAudioVariant", "mp4a.40.2")):
+            master = self.http.add(
+                f"http://manifest.fixture.test/{name}/master.m3u8",
+                '#EXTM3U\n#EXT-X-STREAM-INF:RESOLUTION=1280x720,BANDWIDTH=3000000\n' + self.entries[5][2] +
+                '\n#EXT-X-STREAM-INF:CODECS="' + codecs + '",BANDWIDTH=1000000\n' + audio_variant + "\n")
+            self.append(name + ".uk", "Codec declaration must match decoded media", master)
+        report = self.run_sync()
+        for identity in ("ZeroAudio.uk", "VideoNotAudio.uk", "AudioAsVideoVariant.uk", "AudioAsVideoCodecs.uk"):
+            self.assertNotEqual(self.by_id(report, identity)["status"], "usable")
+            self.assertNotIn('tvg-id="' + identity + '"', self.playlist())
+        self.assertEqual(self.by_id(report, "AudioAsVideoCodecs.uk")["status"], "unknown-resolution")
+        self.assertEqual(self.by_id(report, "GenuineAudioVariant.uk")["status"], "usable")
+        self.assertEqual(self.by_id(report, "GenuineAudioVariant.uk")["height"], 720)
 
     def test_hls_preferred_over_higher_quality_clear_dash_and_quality_aliases(self):
         self.append("Fixture0.uk@UHD", "Fixture 0 (2160p)", self.dash("filler-4k"))
@@ -367,7 +885,7 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(set(self.by_id(report, "Fixture0.uk@HD")["hosts"]), expected)
 
     def test_drm_rejected_but_public_aes_key_and_real_ciphertext_accepted(self):
-        self.assertGreater(len(self.cipher), 65536, "AES fixture must exercise a truncated CBC prefix")
+        self.assertGreater(len(self.cipher), 2 * 1024 * 1024, "AES fixture must exercise a truncated CBC prefix")
         encrypted = self.hls("public-aes", "http://cipher.fixture.test/sample.ts",
                              '#EXT-X-KEY:METHOD=AES-128,URI="http://keys.fixture.test/key.bin",IV=0x' + self.iv + "\n")
         self.http.add("http://cipher.fixture.test/sample.ts", self.cipher)
@@ -681,9 +1199,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary")
     parser.add_argument("--ffmpeg", default=shutil.which("ffmpeg"))
+    parser.add_argument("--ffprobe", default=shutil.which("ffprobe"))
     ARGS, remaining = parser.parse_known_args()
     if not ARGS.ffmpeg:
         parser.error("--ffmpeg is required to generate genuine local media and AES fixtures")
+    if not ARGS.ffprobe:
+        ARGS.ffprobe = str(Path(ARGS.ffmpeg).with_name("ffprobe"))
     unittest.main(argv=[sys.argv[0], *remaining])
 
 
