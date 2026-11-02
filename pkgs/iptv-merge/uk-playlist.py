@@ -141,9 +141,30 @@ class Channel:
             return "bbc-one" if name.casefold() == "bbc one" else "bbc-two"
         return "name:" + name.casefold()
 
+    @property
+    def display_name(self):
+        name = next((label for key, label in BBC_CHANNELS.values() if key == self.key), self.name)
+        # Strip innermost annotations first so nested/repeated groups leave no debris.
+        while True:
+            name, count = re.subn(r"\([^()[\]]*\)|\[[^()[\]]*\]",
+                                 lambda match: match.group()[1:-1].strip()
+                                 if re.fullmatch(r"\s*\+\d+\s*", match.group()[1:-1]) else "", name)
+            if not count:
+                break
+        name = " ".join(name.split())
+        if not name or any(char in name for char in "()[]"):
+            fail("Channel display name is empty or has unbalanced annotations", "invalid-source")
+        return name
+
     def render(self, url):
         metadata, _ = extinf_parts(self.extinf)
-        name = next((label for key, label in BBC_CHANNELS.values() if key == self.key), self.name)
+        name = self.display_name
+        if "tvg-name" in self.attrs:
+            quote = '"' if '"' not in name else "'" if "'" not in name else None
+            if quote is None:
+                fail("Channel display name cannot be represented as an M3U attribute", "unsupported")
+            metadata = ATTR_RE.sub(lambda match: f"{match.group(1)}={quote}{name}{quote}"
+                                   if match.group(1).lower() == "tvg-name" else match.group(), metadata)
         _, _, headers = playback_request(self, defaults=False)
         for attr, header in (("http-referer", "Referer"), ("http-user-agent", "User-Agent")):
             if header in headers and attr not in self.attrs:
@@ -1187,7 +1208,8 @@ def choose_candidates(candidates, required=REQUIRED):
                 used_urls.add(candidate.url)
             else:
                 candidate.selection = "url-duplicate" if candidate.url in used_urls else "canonical-duplicate"
-    return sorted(selected, key=lambda candidate: candidate.channel.index)
+    return sorted(selected, key=lambda candidate: (
+        candidate.channel.display_name.casefold(), candidate.channel.key, candidate.url))
 
 
 def sync_directory(path):

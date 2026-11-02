@@ -394,6 +394,17 @@ class CatalogueTests(unittest.TestCase):
         segment = next(line for line in manifest.splitlines() if line and not line.startswith("#"))
         return fetch(urljoin(url, segment))
 
+    def assert_aptv_media_decodes(self, identity):
+        sample = self.root / "aptv-consumer.ts"
+        sample.write_bytes(self.aptv_media(identity))
+        result = subprocess.run(
+            [ARGS.ffprobe, "-v", "error", "-protocol_whitelist", "file,data", "-select_streams", "v:0",
+             "-read_intervals", "%+0.25", "-show_entries", "frame=height", "-of", "json", str(sample)],
+            capture_output=True, text=True, timeout=10, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        frames = json.loads(result.stdout).get("frames", [])
+        self.assertGreaterEqual(max((frame.get("height", 0) for frame in frames), default=0), 720)
+
     def bbc_api(self, service, urls, template=BBC_API_TEMPLATE, priorities=None):
         priorities = priorities or ["10"] * len(urls)
         connections = [{"protocol": "https", "transferFormat": "hls", "href": url, "priority": priority}
@@ -445,6 +456,74 @@ class CatalogueTests(unittest.TestCase):
         published_urls = [line for line in text.splitlines() if line and not line.startswith("#")]
         self.assertEqual(len(published_urls), len(set(published_urls)))
         self.assertEqual(text.splitlines()[0], HEADER)
+
+    def test_clean_display_names_sort_without_changing_identity_or_http_controls(self):
+        agent = "Fixture Chrome/155 (TV, APTV)"
+        referer = "https://watch.fixture.test/player?keep=a%26b"
+        require = {"User-Agent": agent, "Referer": referer}
+        options = (f"#EXTVLCOPT:http-user-agent={agent}", f"#EXTVLCOPT:http-referrer={referer}")
+        cases = (
+            ("SkySportsF1.uk", "  Sky   Sports F1 (720p)", "Sky Sports F1"),
+            ("CBeebies.uk", "CBeebies (United Kingdom) (720p) [Geo-blocked]", "CBeebies"),
+            ("AuctionHunters.uk", "Auction Hunters (Germany) GB", "Auction Hunters GB"),
+            ("JudgeZ.uk", "Judge Judy (Germany)", "Judge Judy"),
+            ("JudgeA.uk", "Judge Judy [Not 24/7]", "Judge Judy"),
+            ("Nested.uk", "Nested [region (United Kingdom)] (720p)", "Nested"),
+            ("BBCOne.uk@Plus1", "BBC One (+1) (720p)", "BBC One +1"),
+            ("Alpha.uk", "alpha [Not 24/7]", "alpha"),
+        )
+        self.entries[0] = (self.entries[0][0].replace(
+            ",BBC One", ' tvg-name="BBC One London (720p)",BBC One'), *self.entries[0][1:])
+        for identity, original, _ in cases:
+            segment = f"http://protected-names.fixture.test/{identity}.ts?keep=a%26b"
+            url = f"http://protected-names.fixture.test/{identity}.m3u8?keep=a%26b"
+            self.http.add(segment, self.ts, require=require)
+            self.http.add(url, "#EXTM3U\n#EXTINF:1,\n" + segment + "\n", require=require)
+            metadata = (f" TvG-NaMe='{original}'" +
+                        ' tvg-logo="https://logos.fixture.test/one,two.png" group-title="UK (HD)"' +
+                        f' http-user-agent="{agent}"')
+            self.append(identity, original, url, options, metadata)
+        report = self.run_sync()
+        text = self.playlist()
+        self.assertEqual(text.splitlines()[0], HEADER)
+        names = [line.rsplit(",", 1)[1] for line in text.splitlines() if line.startswith("#EXTINF:")]
+        self.assertEqual(names, sorted(names, key=str.casefold))
+        self.assertEqual(report["published_channels"], 10 + len(cases))
+        for index, (identity, original, expected) in enumerate(cases, 10):
+            with self.subTest(identity=identity):
+                candidate = self.by_id(report, identity)
+                self.assertEqual(candidate["selection"], "selected")
+                self.assertEqual(candidate["name"], original)
+                self.assertEqual(candidate["index"], index)
+                attrs, url = self.published_entry(identity)
+                self.assertEqual(url, f"http://protected-names.fixture.test/{identity}.m3u8?keep=a%26b")
+                self.assertEqual(attrs["tvg-name"], expected)
+                self.assertEqual(attrs["tvg-logo"], "https://logos.fixture.test/one,two.png")
+                self.assertEqual(attrs["group-title"], "UK (HD)")
+                self.assertEqual(attrs["http-user-agent"], agent)
+                self.assertEqual(attrs["http-referer"], referer)
+                info = next(line for line in text.splitlines()
+                            if line.startswith("#EXTINF:") and f'tvg-id="{identity}"' in line)
+                self.assertTrue(info.endswith("," + expected), info)
+                self.assertIn("\n".join((*options, url)), text)
+                self.assert_aptv_media_decodes(identity)
+        self.assertEqual(names.count("Judge Judy"), 2)
+        self.assertLess(text.index('tvg-id="JudgeA.uk"'), text.index('tvg-id="JudgeZ.uk"'))
+        self.assertIn(",BBC Scotland\n", text)
+        self.assertIn(",Tiny Pop +1\n", text)
+        self.assertEqual(self.published_entry("BBCOne.uk@London")[0]["tvg-name"], "BBC One")
+
+    def test_invalid_clean_display_names_preserve_complete_generation(self):
+        self.run_sync()
+        target = os.readlink(self.output)
+        before = {name: (self.output / name).read_bytes() for name in ("tv.m3u", "tv-domains.txt", "report.json")}
+        url = self.hls("invalid-display")
+        for name in ("(720p) [Geo-blocked]", "Broken [annotation", """Both "double" and 'single'"""):
+            with self.subTest(name=name):
+                entry = ('#EXTINF:-1 tvg-id="InvalidDisplay.uk" tvg-name="upstream",' + name, (), url)
+                self.run_sync(success=False, entries=[*self.entries, entry])
+                self.assertEqual(os.readlink(self.output), target)
+                self.assertEqual({name: (self.output / name).read_bytes() for name in before}, before)
 
     def test_metadata_headers_and_query_survive_actual_child_requests(self):
         url = "http://headers.fixture.test/live.m3u8?token=history-secret-fixture&value=a%26b"
@@ -512,7 +591,7 @@ class CatalogueTests(unittest.TestCase):
                             if line.startswith("#EXTINF:") and f'tvg-id="{name}.uk"' in line)
                 self.assertEqual(len(re.findall(r"(?<![\w-])http-referer\s*=", info)), 1)
                 self.assertEqual(len(re.findall(r"(?<![\w-])http-user-agent\s*=", info)), 1)
-                self.assertEqual(self.aptv_media(name + ".uk"), self.ts)
+                self.assert_aptv_media_decodes(name + ".uk")
         self.assertEqual(self.by_id(report, "ConflictingControls.uk")["status"], "unsupported")
         self.assertFalse(any(path == "/conflict.m3u8" for _, path, _ in self.http.seen))
         ordinary, _ = self.published_entry("Fixture0.uk@HD")
@@ -583,8 +662,14 @@ class CatalogueTests(unittest.TestCase):
                     self.assertEqual(len(candidates), 1, "Duplicate bitrate records must yield one master probe")
                     self.assertEqual(candidates[0]["selection"], "selected")
                     self.assertEqual(candidates[0]["height"], 720)
+                    self.assertGreaterEqual(candidates[0]["index"], report["source_channels"])
                     self.assertIn(masters[service] + "\n", self.playlist())
                     self.assertEqual(self.playlist().count("," + label + "\n"), 1)
+                names = [line.rsplit(",", 1)[1] for line in self.playlist().splitlines()
+                         if line.startswith("#EXTINF:")]
+                self.assertEqual(names, sorted(names, key=str.casefold))
+                self.assertEqual([name for name in names if name in ("BBC News", "BBC One", "BBC Two")],
+                                 ["BBC News", "BBC One", "BBC Two"])
                 excluded = self.by_id(report, "BBCNewsPashto.uk@HD")
                 self.assertEqual(excluded["status"], "excluded")
                 self.assertEqual(excluded["attempts"], [])
@@ -1177,7 +1262,6 @@ class CatalogueTests(unittest.TestCase):
         self.assertEqual(self.by_id(report, "ActualVariant.uk")["height"], 720)
         self.assertEqual(self.by_id(report, "BBCOne.uk@ScotlandHD")["selection"], "selected")
         self.assertEqual(self.playlist().count(",BBC One\n"), 1)
-        self.assertNotIn(",Advertised HD (1080p)\n", self.playlist())
 
     def test_hls_byte_ranges_keep_query_and_check_offset(self):
         # An incorrect media offset lands in nonmedia padding, not another
