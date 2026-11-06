@@ -2,6 +2,19 @@
 Nix 软件包与 NixOS 模块，源码见 `pkgs/`、`modules/`。
 用 `nix flake show github:jx8819/mynix` 查看输出，按需构建软件包或导入模块。
 
+## Home Assistant：Tuya Local
+
+`ha-tuya-local` 通过现有 overlay 与 `packages.x86_64-linux` 导出，复用 Nixpkgs
+的 Tuya Local（当前锁定上游版本 `2026.5.2`），追加新风除湿机
+PID `gcej0ye8rj60qiee` 的产品描述。DP 定义来自云端产品模型，并以真实设备的
+LAN 状态核对；不代表所有控制均已实机验证，DP 2、12 仍未映射。
+滤网重置属于维护操作，按钮默认禁用，不自动执行。
+主机地址、设备 ID、`local_key` 与配置条目由使用方在运行时提供，不随软件包发布。
+
+软件包同时修复配置选项更新的重载生命周期：经 Home Assistant 的
+`config_entries.async_reload` 卸载、加载，并在条目卸载时注销更新监听器，
+避免绕过核心状态机或重复注册监听器。
+
 ## IPTV 输出多实例
 
 导入 `nixosModules.iptv-merge` 后，在既有订阅源、过滤规则和运行身份配置下，

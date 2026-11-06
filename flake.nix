@@ -54,6 +54,8 @@
         ha-xiaomi-home = "default";
         # HA 自定义组件：Home Connect Local（domain: homeconnect_ws）
         ha-homeconnect-local = "default";
+        # HA 自定义组件：Tuya Local（复用 Nixpkgs，追加新风除湿机产品描述）
+        ha-tuya-local = "default";
         # Lume VPS 探针监控客户端（vpsmon-agent）
         lume-agent = "default";
         # UDP-to-HTTP 组播转单播代理

@@ -1,0 +1,101 @@
+# Cloud-derived DP schema confirmed by direct LAN status; not all controls tested.
+# No manufacturer or additional modes/speeds are inferred from similar devices.
+name: Fresh Air Dehumidifier
+products:
+  - id: gcej0ye8rj60qiee
+    model: Fresh Air Dehumidifier
+entities:
+  - entity: humidifier
+    class: dehumidifier
+    dps:
+      - id: 1
+        name: switch
+        type: boolean
+      - id: 8
+        name: current_humidity
+        type: integer
+        range:
+          min: 0
+          max: 100
+      - id: 46
+        name: humidity
+        type: integer
+        range:
+          min: 29
+          max: 90
+        mapping:
+          - step: 1
+  - entity: sensor
+    class: humidity
+    dps:
+      - id: 8
+        name: sensor
+        type: integer
+        unit: "%"
+        class: measurement
+        range:
+          min: 0
+          max: 100
+  - entity: sensor
+    class: temperature
+    dps:
+      - id: 9
+        name: sensor
+        type: integer
+        unit: C
+        class: measurement
+        range:
+          min: 0
+          max: 99
+  - entity: switch
+    name: Child lock
+    category: config
+    dps:
+      - id: 14
+        name: switch
+        type: boolean
+  - entity: switch
+    name: Fresh air valve
+    dps:
+      - id: 32
+        name: switch
+        type: boolean
+  - entity: sensor
+    translation_key: filter_life
+    category: diagnostic
+    dps:
+      - id: 11
+        name: sensor
+        type: integer
+        # Cloud model specifies no unit; do not interpret this as hours or %.
+        range:
+          min: 0
+          max: 6000
+  - entity: sensor
+    name: Fault code
+    category: diagnostic
+    dps:
+      - id: 18
+        name: sensor
+        type: bitfield
+        # Bits 0..7 are E1..E8; meanings are unknown. Zero means no fault.
+        range:
+          min: 0
+          max: 255
+  - entity: binary_sensor
+    translation_key: defrost
+    category: diagnostic
+    dps:
+      - id: 54
+        name: sensor
+        type: boolean
+        readonly: true
+  - entity: button
+    translation_key: filter_reset
+    category: config
+    # Maintenance operation: never enable or press automatically.
+    hidden: true
+    dps:
+      - id: 13
+        name: button
+        type: boolean
