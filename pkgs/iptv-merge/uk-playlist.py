@@ -54,6 +54,10 @@ BBC_API_TEMPLATE = ("https://open.live.bbc.co.uk/mediaselector/6/select/version/
 BBC_CHANNELS = {"bbcone.uk": ("bbc-one", "BBC One"),
                 "bbctwo.uk": ("bbc-two", "BBC Two"),
                 "bbcnews.uk": ("bbc-news", "BBC News")}
+# The published catalogue is one group: upstream iptv-org categories are not
+# carried over, so clients show a single "英国电视台" group instead of News /
+# Movies / Kids / Undefined and their ";"-joined combinations.
+GROUP_TITLE = "英国电视台"
 
 
 class ProbeError(Exception):
@@ -173,6 +177,11 @@ class Channel:
                 if quote is None:
                     fail("Explicit HTTP control cannot be represented as an M3U attribute", "unsupported")
                 metadata += f" {attr}={quote}{value}{quote}"
+        if "group-title" in self.attrs:
+            metadata = ATTR_RE.sub(lambda match: f'{match.group(1)}="{GROUP_TITLE}"'
+                                   if match.group(1).lower() == "group-title" else match.group(), metadata)
+        else:
+            metadata += f' group-title="{GROUP_TITLE}"'
         return "\n".join((metadata + "," + name, *self.options, url)) + "\n"
 
 

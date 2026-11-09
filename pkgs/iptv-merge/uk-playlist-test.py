@@ -499,7 +499,7 @@ class CatalogueTests(unittest.TestCase):
                 self.assertEqual(url, f"http://protected-names.fixture.test/{identity}.m3u8?keep=a%26b")
                 self.assertEqual(attrs["tvg-name"], expected)
                 self.assertEqual(attrs["tvg-logo"], "https://logos.fixture.test/one,two.png")
-                self.assertEqual(attrs["group-title"], "UK (HD)")
+                self.assertEqual(attrs["group-title"], "英国电视台")
                 self.assertEqual(attrs["http-user-agent"], agent)
                 self.assertEqual(attrs["http-referer"], referer)
                 info = next(line for line in text.splitlines()
@@ -512,6 +512,7 @@ class CatalogueTests(unittest.TestCase):
         self.assertIn(",BBC Scotland\n", text)
         self.assertIn(",Tiny Pop +1\n", text)
         self.assertEqual(self.published_entry("BBCOne.uk@London")[0]["tvg-name"], "BBC One")
+        self.assertEqual(self.published_entry("BBCOne.uk@London")[0]["group-title"], "英国电视台")
 
     def test_invalid_clean_display_names_preserve_complete_generation(self):
         self.run_sync()
@@ -542,7 +543,7 @@ class CatalogueTests(unittest.TestCase):
         attrs, published_url = self.published_entry("Fixture0.uk@HD")
         self.assertEqual(published_url, url + tail)
         self.assertEqual(attrs["tvg-logo"], "https://logos.fixture.test/one,two.png?keep=a%26b")
-        self.assertEqual(attrs["group-title"], "News")
+        self.assertEqual(attrs["group-title"], "英国电视台")
         self.assertEqual(attrs["user-agent"], "Agent/1 (x, y)")
         self.assertEqual(attrs["http-referer"], require["Referer"])
         self.assertEqual(attrs["http-user-agent"], require["User-Agent"])
