@@ -28,7 +28,9 @@ kernel.stdenv.mkDerivation (finalAttrs: {
   # The dev output deliberately omits C sources. Apply the same source patches,
   # then use only fs/smb/server as an external module against the prepared dev.
   inherit (kernel) src;
-  patches = kernel.patches or [ ];
+  patches = (kernel.patches or [ ]) ++ [
+    ./0001-ksmbd-preserve-transform-header-in-smb-direct-writes.patch
+  ];
   patchFlags = kernel.patchFlags or [ "-p1" ];
   prePatch = kernel.prePatch or "";
   postPatch = (kernel.postPatch or "") + ''

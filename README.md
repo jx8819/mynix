@@ -34,6 +34,19 @@ in {
 构建成功不等于已加载，更不等于已建立 SMB Direct；仍须检查实际模块、
 RDMA CM/QP 与客户端所选通道及传输计数。
 
+### 加密传输帧修复
+
+SMB3 加密帧的首 iovec 可能合并 4 字节 RFC1002 前缀与 52 字节 transform header。
+RDMA 发送端必须只跨过前缀，不能整体丢弃该 iovec，否则会出现 `-EINVAL` 与传输超时。
+这里参考 [Linux 上游修复](https://github.com/torvalds/linux/commit/08ffdf0c416849615e8bc935839557429ec24194.patch)
+的语义适配 6.18 源码，不是原样 cherry-pick，也不是官方 stable 回移。
+修复模块已通过 8MiB 随机数据和每方向 2GiB 的加密传输往返校验；
+这是实际加载模块的回归证据，不以构建成功代替运行验证。
+
+加密 SMB3 会话可显示 `Encrypted=True`、`Signed=False`，由 AEAD 提供完整性，
+不代表关闭了客户端完整性要求。SMB Direct 的 SEND/RECV 数据计数增长与
+单边 RDMA Read/Write 是不同证据，不能由前者宣称单边 RDMA 或零拷贝。
+
 ## Home Assistant：Tuya Local
 
 `ha-tuya-local` 通过现有 overlay 与 `packages.x86_64-linux` 导出，复用 Nixpkgs

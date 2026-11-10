@@ -1,0 +1,39 @@
+Subject: [PATCH] ksmbd: preserve transform headers in SMB Direct writes
+
+SMB Direct must omit the four-byte RFC1002 prefix, not the entire first
+response vector. Unencrypted responses put only that prefix in iov[0],
+but smb3_encrypt_resp() replaces it with the prefix followed by the
+52-byte SMB3 transform header. Requiring a four-byte first vector rejects
+these encrypted responses with -EINVAL before sending them.
+
+Start the vector cursor four bytes into the first vector, advancing to
+the next vector only when the prefix occupied the whole first vector.
+This preserves the transform header and the existing plaintext layout
+without copying or changing the caller's vectors. Reject truncated
+framing and invalid vector counts before subtracting the prefix length.
+
+--- a/fs/smb/server/transport_rdma.c
++++ b/fs/smb/server/transport_rdma.c
+@@ -1518,11 +1518,18 @@ static int smb_direct_writev(struct ksmbd_transport *t,
+ 	if (sc->status != SMBDIRECT_SOCKET_CONNECTED)
+ 		return -ENOTCONN;
+ 
+-	//FIXME: skip RFC1002 header..
+-	if (WARN_ON_ONCE(niovs <= 1 || iov[0].iov_len != 4))
++	/*
++	 * Skip only the RFC1002 prefix, not payload in the first vector.
++	 * Encrypted responses also put their SMB3 transform header here.
++	 */
++	if (WARN_ON_ONCE(niovs < 1 || buflen < 4 || iov[0].iov_len < 4))
+ 		return -EINVAL;
+ 	buflen -= 4;
+-	iov_idx = 1;
+-	iov_ofs = 0;
++	iov_idx = 0;
++	iov_ofs = 4;
++	if (iov[0].iov_len == 4) {
++		iov_idx = 1;
++		iov_ofs = 0;
++	}
+ 
+ 	remaining_data_length = buflen;
