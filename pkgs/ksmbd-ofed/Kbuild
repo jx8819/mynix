@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+include $(src)/Makefile
+
+# Mirror the OFED consumers: native configuration, vendor compatibility header,
+# then vendor RDMA/UAPI headers before the original kernel include search path.
+# Keep the kernel's complete architecture/generated/compiler include flags.
+LINUXINCLUDE := \
+	$(OFA_BACKPORT_INCLUDES) \
+	-include $(objtree)/include/generated/autoconf.h \
+	-include $(srctree)/include/linux/kconfig.h \
+	-include $(OFA_DIR)/include/linux/compat-2.6.h \
+	-I$(src) \
+	-I$(OFA_DIR)/include \
+	-I$(OFA_DIR)/include/uapi \
+	$(LINUXINCLUDE)
+
+# Kbuild selects transport_rdma.o via the make flag; the C preprocessor needs
+# the same module-local option, without changing the prepared kernel's config.
+ccflags-y += -DCONFIG_SMB_SERVER_SMBDIRECT=1 -g -fno-eliminate-unused-debug-types

@@ -2,6 +2,38 @@
 Nix 软件包与 NixOS 模块，源码见 `pkgs/`、`modules/`。
 用 `nix flake show github:jx8819/mynix` 查看输出，按需构建软件包或导入模块。
 
+## ksmbd：匹配 OFED 的 SMB Direct 模块
+
+`pkgs/ksmbd-ofed` 只构建内核的 ksmbd 模块，使用调用方提供的内核与
+`mlnx-ofed-kernel` 头文件/符号表，避免将原生 RDMA 结构布局混用于 OFED。
+它依赖具体内核/OFED 配对，**不是独立的 `packages.<system>.ksmbd-ofed` 输出**；
+在使用方的 NixOS 配置中通过源码路径 `callPackage`：
+
+```nix
+{ config, inputs, pkgs, ... }:
+let
+  kernelPackages = config.boot.kernelPackages;
+  ksmbdOfed = pkgs.callPackage (inputs.mynix + "/pkgs/ksmbd-ofed") {
+    kernel = kernelPackages.kernel;
+    ofed = kernelPackages.mlnx-ofed-kernel;
+  };
+in {
+  boot.extraModulePackages = [ ksmbdOfed ];
+}
+```
+
+调用方必须使用同一内核配套的 OFED 驱动栈；同版本号不能证明 ABI 相同。
+源码须含 `fs/smb/common/smbdirect` 布局，内核须已提供模块、ksmbd 与必要 RDMA 支持；
+缺少准备好的输入、布局不符或要求尚未实现的强制模块签名时，构建会拒绝。
+输出保留安装 ELF 的 DWARF，提供 `modulePath`、`metadataPath`，
+并在 `nix-support/ksmbd-ofed/` 保存构建信息、配置与编译命令供 ABI 核验。
+
+此包不创建 SMB 服务、共享或账号，也不改变调用方的内核选择。
+不必为它重编整个内核；只有与运行内核/OFED 完全匹配并完成 ABI 核验后，
+才能评估仅替换 ksmbd 模块而不重启的方案，不能承诺任意驱动升级均免重启。
+构建成功不等于已加载，更不等于已建立 SMB Direct；仍须检查实际模块、
+RDMA CM/QP 与客户端所选通道及传输计数。
+
 ## Home Assistant：Tuya Local
 
 `ha-tuya-local` 通过现有 overlay 与 `packages.x86_64-linux` 导出，复用 Nixpkgs
