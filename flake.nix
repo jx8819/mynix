@@ -42,6 +42,8 @@
         oh-my-sage = "default";
         # Miloco agent webhook → 受限 OMP 桥（仅米家设备/场景工具）
         miloco-omp-agent = "default";
+        # Juspay 的 Agent Plugins 技能包（omp 外挂技能源，github:juspay/skills）
+        juspay-skills = "default";
         # 米家设备 MCP 服务
         miot-mcp = "default";
         # ddddocr 验证码识别 python 库（nixpkgs 未收录，hdsky-checkin 的依赖），也可单独用
