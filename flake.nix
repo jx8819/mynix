@@ -54,6 +54,8 @@
         ha-cololight = "default";
         # HA 官方小米集成（domain: xiaomi_home，unfree）
         ha-xiaomi-home = "default";
+        # HA 第三方小米集成（al-one/hass-xiaomi-miot，domain: xiaomi_miot）
+        ha-xiaomi-miot = "default";
         # HA 自定义组件：Home Connect Local（domain: homeconnect_ws）
         ha-homeconnect-local = "default";
         # HA 自定义组件：Tuya Local（复用 Nixpkgs，追加新风除湿机产品描述）

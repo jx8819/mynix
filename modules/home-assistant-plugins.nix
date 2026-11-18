@@ -35,7 +35,11 @@ in
     xiaomiMiot = lib.mkOption {
       type = lib.types.bool;
       default = false;
-      description = "Enable al-one/xiaomi_miot integration (alternative to xiaomiHome).";
+      description = ''
+        Enable al-one/hass-xiaomi-miot integration (domain: xiaomi_miot).
+        Uses the version-pinned pkgs.ha-xiaomi-miot package from mynix.
+        Requires extraComponents: ffmpeg (cameras); homekit is optional.
+      '';
     };
 
     homeconnectLocal = lib.mkOption {
@@ -50,7 +54,7 @@ in
       customComponents =
         lib.optional cfg.xiaomiHome pkgs.ha-xiaomi-home
         ++ lib.optional cfg.homeconnectLocal pkgs.ha-homeconnect-local
-        ++ lib.optional cfg.xiaomiMiot pkgs.home-assistant-custom-components.xiaomi_miot
+        ++ lib.optional cfg.xiaomiMiot pkgs.ha-xiaomi-miot
         ++ lib.optional cfg.dyson pkgs.ha-dyson
         ++ lib.optional cfg.cololight pkgs.ha-cololight;
 
